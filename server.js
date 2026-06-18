@@ -1,5 +1,4 @@
 const express = require('express');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -8,17 +7,24 @@ const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = require('baileys');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
+// Crear directorios necesarios si no existen
+['uploads', 'uploads/images', 'public', 'logs', 'auth_info'].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+});
+
 // Configuración de multer para subir archivos
 const upload = multer({ dest: 'uploads/' });
-const uploadImage = multer({ 
+const uploadImage = multer({
     dest: 'uploads/images/',
     fileFilter: (req, file, cb) => {
-        // Permitir solo imágenes
         if (file.mimetype.startsWith('image/')) {
             cb(null, true);
         } else {
@@ -26,7 +32,7 @@ const uploadImage = multer({
         }
     },
     limits: {
-        fileSize: 5 * 1024 * 1024 // 5MB máximo
+        fileSize: 5 * 1024 * 1024
     }
 });
 
@@ -45,238 +51,200 @@ app.get('/contacts', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'contacts.html'));
 });
 
-// Cliente de WhatsApp
-let client;
+// Cliente de WhatsApp (Baileys)
+let sock = null;
 let isClientReady = false;
 let qrCodeData = null;
 
 // Variables de control
 let isInitializing = false;
 let qrRetryCount = 0;
-const MAX_QR_RETRIES = 3;
+const MAX_QR_RETRIES = 5;
 let initializationTimeout = null;
 
-// Inicializar cliente de WhatsApp
-function initializeWhatsApp() {
+// Función para normalizar números de teléfono
+const normalizePhoneNumber = (number) => {
+    let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
+    if (cleanNumber.length >= 10 && /^\d+$/.test(cleanNumber)) {
+        return cleanNumber;
+    }
+    return cleanNumber;
+};
+
+// Convertir número a JID de WhatsApp
+const numberToJid = (number) => {
+    const clean = normalizePhoneNumber(number);
+    return clean.includes('@s.whatsapp.net') ? clean : `${clean}@s.whatsapp.net`;
+};
+
+// Inicializar cliente de WhatsApp con Baileys
+async function initializeWhatsApp() {
     if (isInitializing) {
         console.log('Ya se está inicializando el cliente...');
         return;
     }
 
-    // Limpiar timeout anterior si existe
     if (initializationTimeout) {
         clearTimeout(initializationTimeout);
     }
 
     isInitializing = true;
-    console.log('Inicializando cliente de WhatsApp...');
-    console.log('Nota: Si hay problemas con Puppeteer, intenta: npm install --save-dev @vscode/sqlite3');
-    
-    // Timeout de seguridad para evitar que se quede colgado
+    console.log('Inicializando cliente de WhatsApp (Baileys)...');
+
     initializationTimeout = setTimeout(() => {
         if (isInitializing && !isClientReady) {
-            console.log('Timeout de inicialización alcanzado. Reiniciando proceso...');
+            console.log('Timeout de inicialización alcanzado. Reiniciando...');
             isInitializing = false;
-            if (client) {
-                client.destroy().catch(() => {});
+            if (sock) {
+                sock.end(undefined);
             }
-            setTimeout(() => {
-                initializeWhatsApp();
-            }, 5000);
+            setTimeout(() => initializeWhatsApp(), 5000);
         }
-    }, 120000); // 2 minutos de timeout
-    
-    client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: "whatsapp-bulk",
-            dataPath: './.wwebjs_auth'
-        }),
-        puppeteer: {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
-            ],
-            timeout: 60000
-        },
-        webVersionCache: {
-            type: 'remote',
-            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-        }
-    });
+    }, 120000);
 
-    client.on('qr', async (qr) => {
-        qrRetryCount++;
-        console.log(`QR Code generado (intento ${qrRetryCount}/${MAX_QR_RETRIES})`);
-        
-        if (qrRetryCount > MAX_QR_RETRIES) {
-            console.log('Máximo número de intentos de QR alcanzado. Reiniciando...');
-            client.destroy();
-            isInitializing = false;
-            qrRetryCount = 0;
-            setTimeout(() => {
-                initializeWhatsApp();
-            }, 10000);
-            return;
-        }
-        
-        try {
-            qrCodeData = await qrcode.toDataURL(qr);
-            io.emit('qr', qrCodeData);
-        } catch (error) {
-            console.error('Error generando QR:', error);
-        }
-    });
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+        const { version } = await fetchLatestBaileysVersion();
 
-    client.on('ready', async () => {
-        console.log('Cliente de WhatsApp listo!');
-        isClientReady = true;
-        isInitializing = false;
-        qrCodeData = null;
-        qrRetryCount = 0;
-
-        // Limpiar timeout de inicialización
-        if (initializationTimeout) {
-            clearTimeout(initializationTimeout);
-            initializationTimeout = null;
-        }
-
-        // Emitir a todos los clientes conectados
-        console.log('Notificando a clientes que WhatsApp está listo...');
-        io.emit('ready');
-        io.emit('status', {
-            ready: true,
-            qrCode: null
+        sock = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: false,
+            browser: ['Mensajes Masivos', 'Chrome', '10.0'],
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 0,
+            keepAliveIntervalMs: 30000,
+            emitOwnEvents: true,
+            getMessage: async () => { return { conversation: '' }; }
         });
-        
-        // Cargar todos los chats existentes para obtener el historial de contactos
-        try {
-            console.log('Cargando historial de chats...');
-            const chats = await client.getChats();
-            console.log(`Encontrados ${chats.length} chats`);
-            
-            for (const chat of chats) {
-                if (!chat.isGroup) { // Solo contactos individuales
-                    try {
-                        const contact = await chat.getContact();
+
+        // Guardar credenciales cuando se actualicen
+        sock.ev.on('creds.update', saveCreds);
+
+        // Manejar actualizaciones de conexión
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            // Código QR recibido
+            if (qr) {
+                qrRetryCount++;
+                console.log(`QR Code generado (intento ${qrRetryCount}/${MAX_QR_RETRIES})`);
+
+                if (qrRetryCount > MAX_QR_RETRIES) {
+                    console.log('Máximo número de intentos de QR alcanzado. Reiniciando...');
+                    sock.end(undefined);
+                    isInitializing = false;
+                    qrRetryCount = 0;
+                    setTimeout(() => initializeWhatsApp(), 10000);
+                    return;
+                }
+
+                try {
+                    qrCodeData = await qrcode.toDataURL(qr);
+                    io.emit('qr', qrCodeData);
+                    io.emit('status', { ready: false, qrCode: qrCodeData });
+                } catch (error) {
+                    console.error('Error generando QR:', error);
+                }
+            }
+
+            // Conexión establecida
+            if (connection === 'open') {
+                console.log('Cliente de WhatsApp listo!');
+                isClientReady = true;
+                isInitializing = false;
+                qrCodeData = null;
+                qrRetryCount = 0;
+
+                if (initializationTimeout) {
+                    clearTimeout(initializationTimeout);
+                    initializationTimeout = null;
+                }
+
+                console.log('Notificando a clientes que WhatsApp está listo...');
+                io.emit('ready');
+                io.emit('authenticated');
+                io.emit('status', { ready: true, qrCode: null });
+            }
+
+            // Conexión cerrada
+            if (connection === 'close') {
+                isClientReady = false;
+                isInitializing = false;
+                qrCodeData = null;
+
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                console.log(`Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
+                io.emit('disconnected');
+
+                if (shouldReconnect) {
+                    console.log('Reconectando en 5 segundos...');
+                    setTimeout(() => initializeWhatsApp(), 5000);
+                } else {
+                    console.log('Sesión cerrada. Limpiando credenciales...');
+                    qrRetryCount = 0;
+                    // Limpiar auth para forzar nuevo QR
+                    if (fs.existsSync('auth_info')) {
+                        fs.rmSync('auth_info', { recursive: true, force: true });
+                        fs.mkdirSync('auth_info', { recursive: true });
+                    }
+                    setTimeout(() => initializeWhatsApp(), 3000);
+                }
+            }
+        });
+
+        // Capturar mensajes entrantes para contactos
+        sock.ev.on('messages.upsert', async (m) => {
+            try {
+                if (m.type !== 'notify') return;
+                for (const msg of m.messages) {
+                    if (!msg.key.fromMe && msg.key.remoteJid?.endsWith('@s.whatsapp.net')) {
+                        const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+                        const pushName = msg.pushName || 'Sin nombre';
                         const contactData = {
-                            number: contact.number,
-                            name: contact.pushname || contact.name || 'Sin nombre',
-                            lastMessage: chat.lastMessage ? new Date(chat.lastMessage.timestamp * 1000).toISOString() : new Date().toISOString(),
-                            firstContact: new Date().toISOString(), // Se actualizará si ya existe
+                            number,
+                            name: pushName,
+                            lastMessage: new Date().toISOString(),
                             isGroup: false
                         };
                         saveContact(contactData);
-                    } catch (contactError) {
-                        console.log('Error obteniendo contacto del chat:', contactError.message);
                     }
                 }
+            } catch (error) {
+                console.error('Error procesando mensaje entrante:', error);
             }
-            console.log('Historial de contactos cargado exitosamente');
-        } catch (error) {
-            console.error('Error cargando historial de chats:', error);
-        }
-    });
+        });
 
-    client.on('authenticated', () => {
-        console.log('Autenticado correctamente');
-        isInitializing = false;
-        qrRetryCount = 0;
-
-        // Si se autenticó correctamente, después de un pequeño delay, marcar como listo
-        setTimeout(() => {
-            if (!isClientReady) {
-                console.log('Marcando cliente como listo después de autenticación...');
-                isClientReady = true;
-                qrCodeData = null;
-                io.emit('ready');
-                io.emit('status', {
-                    ready: true,
-                    qrCode: null
-                });
-            }
-        }, 2000);
-
-        io.emit('authenticated');
-    });
-
-    client.on('disconnected', (reason) => {
-        console.log('Cliente desconectado:', reason);
-        isClientReady = false;
-        isInitializing = false;
-        qrCodeData = null;
-        qrRetryCount = 0;
-        io.emit('disconnected');
-        
-        // Solo reconectar si no fue una desconexión intencional
-        if (reason !== 'NAVIGATION' && reason !== 'LOGOUT') {
-            console.log('Esperando 15 segundos antes de reconectar...');
-            setTimeout(() => {
-                if (!isClientReady && !isInitializing) {
-                    console.log('Intentando reconectar...');
-                    initializeWhatsApp();
-                }
-            }, 15000);
-        }
-    });
-
-    client.on('auth_failure', (msg) => {
-        console.error('Fallo de autenticación:', msg);
-        isClientReady = false;
-        isInitializing = false;
-        qrCodeData = null;
-        qrRetryCount = 0;
-        
-        // Limpiar timeout de inicialización
-        if (initializationTimeout) {
-            clearTimeout(initializationTimeout);
-            initializationTimeout = null;
-        }
-        
-        io.emit('auth_failure', msg);
-    });
-
-    // Evento para capturar mensajes entrantes y almacenar contactos
-    client.on('message', async (message) => {
-        try {
-            // Solo procesar mensajes de contactos individuales (no grupos)
-            if (message.from.includes('@c.us')) {
-                const contact = await message.getContact();
-                const contactData = {
-                    number: message.from.replace('@c.us', ''),
-                    name: contact.pushname || contact.name || 'Sin nombre',
-                    lastMessage: new Date().toISOString(),
-                    isGroup: false
-                };
-                
-                saveContact(contactData);
-            }
-        } catch (error) {
-            console.error('Error procesando mensaje entrante:', error);
-        }
-    });
-
-    client.initialize().catch(error => {
+    } catch (error) {
         console.error('Error inicializando cliente:', error);
         isInitializing = false;
-        
-        // Limpiar timeout de inicialización
+
         if (initializationTimeout) {
             clearTimeout(initializationTimeout);
             initializationTimeout = null;
         }
-        
+
         setTimeout(() => {
             console.log('Reintentando inicialización...');
             initializeWhatsApp();
         }, 15000);
+    }
+}
+
+// Función auxiliar para enviar mensaje de texto
+async function sendTextMessage(jid, text) {
+    return await sock.sendMessage(jid, { text });
+}
+
+// Función auxiliar para enviar imagen con caption
+async function sendImageMessage(jid, imagePath, caption, mimetype) {
+    const imageBuffer = fs.readFileSync(imagePath);
+    return await sock.sendMessage(jid, {
+        image: imageBuffer,
+        caption: caption || '',
+        mimetype: mimetype || 'image/jpeg'
     });
 }
 
@@ -286,15 +254,13 @@ app.get('/', (req, res) => {
 });
 
 app.get('/status', async (req, res) => {
-    // Si no hay QR disponible y no está listo, generar uno de prueba
     let qr = qrCodeData;
 
     if (!qr && !isClientReady) {
         try {
-            // Generar un QR de prueba con instrucciones
-            qr = await qrcode.toDataURL('Escanea este código QR con WhatsApp Web para conectar. Si tienes problemas, recarga la página.');
+            qr = await qrcode.toDataURL('Esperando conexión con WhatsApp...');
         } catch (err) {
-            console.error('Error generando QR de prueba:', err);
+            console.error('Error generando QR de estado:', err);
         }
     }
 
@@ -309,42 +275,42 @@ app.post('/request-qr', async (req, res) => {
         if (isClientReady) {
             return res.json({ success: false, error: 'WhatsApp ya está conectado' });
         }
-        
-        // Permitir forzar reinicialización si está atascado
+
         const forceRestart = req.body.force || false;
-        
+
         if (isInitializing && !forceRestart) {
-            return res.json({ 
-                success: false, 
+            return res.json({
+                success: false,
                 error: 'Ya se está inicializando la conexión',
                 canForce: true,
                 message: 'Si el proceso está atascado, puedes forzar el reinicio'
             });
         }
-        
+
         console.log('Solicitando nuevo código QR...');
-        
-        // Limpiar estado anterior
+
         isInitializing = false;
         isClientReady = false;
         qrCodeData = null;
         qrRetryCount = 0;
-        
-        // Destruir cliente existente si existe
-        if (client) {
+
+        if (sock) {
             try {
-                await client.destroy();
-                console.log('Cliente anterior destruido');
+                sock.end(undefined);
+                console.log('Cliente anterior cerrado');
             } catch (error) {
-                console.log('Error destruyendo cliente anterior:', error.message);
+                console.log('Error cerrando cliente anterior:', error.message);
             }
         }
-        
-        // Esperar un momento antes de reinicializar
-        setTimeout(() => {
-            initializeWhatsApp();
-        }, 1000);
-        
+
+        // Limpiar auth para forzar nuevo QR
+        if (fs.existsSync('auth_info')) {
+            fs.rmSync('auth_info', { recursive: true, force: true });
+            fs.mkdirSync('auth_info', { recursive: true });
+        }
+
+        setTimeout(() => initializeWhatsApp(), 1000);
+
         res.json({ success: true, message: 'Solicitud de QR enviada. Generando nuevo código...' });
     } catch (error) {
         console.error('Error solicitando QR:', error);
@@ -359,39 +325,23 @@ app.post('/send-message', async (req, res) => {
     }
 
     const { number, message } = req.body;
-    
-    // Función para normalizar números de teléfono
-    const normalizePhoneNumber = (number) => {
-        // Remover espacios, guiones y otros caracteres
-        let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
-        
-        // Si el número ya tiene formato internacional (empieza con código de país)
-        if (cleanNumber.length >= 10 && /^\d+$/.test(cleanNumber)) {
-            return cleanNumber;
-        }
-        
-        return cleanNumber;
-    };
-    
+
     try {
-        const normalizedNumber = normalizePhoneNumber(number);
-        const chatId = normalizedNumber.includes('@c.us') ? normalizedNumber : `${normalizedNumber}@c.us`;
-        await client.sendMessage(chatId, message);
-        
-        // Registrar contacto
+        const jid = numberToJid(number);
+        await sendTextMessage(jid, message);
+
         try {
-            const contact = await client.getContactById(chatId);
             const contactData = {
-                number: normalizedNumber,
-                name: contact.pushname || contact.name || 'Sin nombre',
+                number: normalizePhoneNumber(number),
+                name: 'Sin nombre',
                 lastMessage: new Date().toISOString(),
                 isGroup: false
             };
             saveContact(contactData);
         } catch (contactError) {
-            console.log('No se pudo obtener información del contacto:', contactError.message);
+            console.log('No se pudo guardar contacto:', contactError.message);
         }
-        
+
         res.json({ success: true, message: 'Mensaje enviado correctamente' });
     } catch (error) {
         console.error('Error enviando mensaje:', error);
@@ -407,63 +357,34 @@ app.post('/send-message-with-image', uploadImage.single('image'), async (req, re
 
     const { number, message } = req.body;
     const imageFile = req.file;
-    
+
     if (!imageFile) {
         return res.status(400).json({ error: 'No se ha subido ninguna imagen' });
     }
-    
-    // Función para normalizar números de teléfono
-    const normalizePhoneNumber = (number) => {
-        // Remover espacios, guiones y otros caracteres
-        let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
-        
-        // Si el número ya tiene formato internacional (empieza con código de país)
-        if (cleanNumber.length >= 10 && /^\d+$/.test(cleanNumber)) {
-            return cleanNumber;
-        }
-        
-        return cleanNumber;
-    };
-    
+
     try {
-        const normalizedNumber = normalizePhoneNumber(number);
-        const chatId = normalizedNumber.includes('@c.us') ? normalizedNumber : `${normalizedNumber}@c.us`;
-        
-        // Crear el objeto MessageMedia desde el archivo de imagen
-        const media = MessageMedia.fromFilePath(imageFile.path);
-        
-        // Forzar el tipo MIME para asegurar que se envíe como imagen
-        media.mimetype = imageFile.mimetype;
-        
-        // Enviar la imagen con el mensaje como caption
-        await client.sendMessage(chatId, media, { caption: message || '' });
-        
-        // Registrar contacto
+        const jid = numberToJid(number);
+        await sendImageMessage(jid, imageFile.path, message, imageFile.mimetype);
+
         try {
-            const contact = await client.getContactById(chatId);
             const contactData = {
-                number: normalizedNumber,
-                name: contact.pushname || contact.name || 'Sin nombre',
+                number: normalizePhoneNumber(number),
+                name: 'Sin nombre',
                 lastMessage: new Date().toISOString(),
                 isGroup: false
             };
             saveContact(contactData);
         } catch (contactError) {
-            console.log('No se pudo obtener información del contacto:', contactError.message);
+            console.log('No se pudo guardar contacto:', contactError.message);
         }
-        
-        // Eliminar el archivo temporal después de enviarlo
+
         fs.unlinkSync(imageFile.path);
-        
         res.json({ success: true, message: 'Mensaje con imagen enviado correctamente' });
     } catch (error) {
         console.error('Error enviando mensaje con imagen:', error);
-        
-        // Eliminar el archivo temporal en caso de error
         if (imageFile && fs.existsSync(imageFile.path)) {
             fs.unlinkSync(imageFile.path);
         }
-        
         res.status(500).json({ error: 'Error enviando mensaje con imagen: ' + error.message });
     }
 });
@@ -492,11 +413,11 @@ app.get('/campaigns/:id', (req, res) => {
     try {
         const campaignId = req.params.id;
         const logFile = path.join('logs', `campaign_${campaignId}.json`);
-        
+
         if (!fs.existsSync(logFile)) {
             return res.status(404).json({ error: 'Campaña no encontrada' });
         }
-        
+
         const data = fs.readFileSync(logFile, 'utf8');
         const campaign = JSON.parse(data);
         res.json({ success: true, campaign });
@@ -510,24 +431,23 @@ app.post('/resend-failed/:id', async (req, res) => {
     if (!isClientReady) {
         return res.status(400).json({ error: 'Cliente de WhatsApp no está listo' });
     }
-    
+
     try {
         const campaignId = req.params.id;
         const { message, minDelay = 3, maxDelay = 6 } = req.body;
-        
+
         const failedNumbers = getFailedNumbers(campaignId);
-        
+
         if (failedNumbers.length === 0) {
             return res.json({ success: true, message: 'No hay números fallidos para reenviar' });
         }
-        
+
         const minDelayMs = parseInt(minDelay) * 1000;
         const maxDelayMs = parseInt(maxDelay) * 1000;
         const results = [];
         const startTime = Date.now();
         const newCampaignId = uuidv4();
-        
-        // Crear nueva campaña para el reenvío
+
         const campaignData = {
             id: newCampaignId,
             parentCampaignId: campaignId,
@@ -539,15 +459,15 @@ app.post('/resend-failed/:id', async (req, res) => {
             results: [],
             status: 'in_progress'
         };
-        
+
         console.log(`Reenviando a ${failedNumbers.length} números fallidos de campaña ${campaignId}`);
-        
+
         for (let i = 0; i < failedNumbers.length; i++) {
             const number = failedNumbers[i];
             try {
-                const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-                await client.sendMessage(chatId, message);
-                
+                const jid = numberToJid(number);
+                await sendTextMessage(jid, message);
+
                 const result = {
                     number,
                     status: 'enviado',
@@ -556,8 +476,7 @@ app.post('/resend-failed/:id', async (req, res) => {
                 };
                 results.push(result);
                 campaignData.results.push(result);
-                
-                // Pausa entre mensajes
+
                 if (i < failedNumbers.length - 1) {
                     const delay = getRandomDelay(minDelayMs, maxDelayMs);
                     await new Promise(resolve => setTimeout(resolve, delay));
@@ -575,8 +494,7 @@ app.post('/resend-failed/:id', async (req, res) => {
                 campaignData.results.push(result);
             }
         }
-        
-        // Finalizar campaña de reenvío
+
         campaignData.endTime = new Date().toISOString();
         campaignData.duration = Date.now() - startTime;
         campaignData.status = 'completed';
@@ -586,9 +504,9 @@ app.post('/resend-failed/:id', async (req, res) => {
             failed: results.filter(r => r.status === 'error').length,
             successRate: ((results.filter(r => r.status === 'enviado').length / failedNumbers.length) * 100).toFixed(2)
         };
-        
+
         saveCampaign(campaignData);
-        
+
         res.json({
             success: true,
             results,
@@ -605,16 +523,16 @@ app.post('/resend-failed/:id', async (req, res) => {
 app.get('/stats', (req, res) => {
     try {
         const campaigns = getCampaigns();
-        
+
         const stats = {
             totalCampaigns: campaigns.length,
             totalMessagesSent: campaigns.reduce((sum, c) => sum + (c.stats?.sent || 0), 0),
             totalMessagesFailed: campaigns.reduce((sum, c) => sum + (c.stats?.failed || 0), 0),
-            averageSuccessRate: campaigns.length > 0 ? 
+            averageSuccessRate: campaigns.length > 0 ?
                 (campaigns.reduce((sum, c) => sum + parseFloat(c.stats?.successRate || 0), 0) / campaigns.length).toFixed(2) : 0,
             recentCampaigns: campaigns.slice(-5).reverse()
         };
-        
+
         res.json({ success: true, stats });
     } catch (error) {
         res.status(500).json({ error: 'Error obteniendo estadísticas: ' + error.message });
@@ -626,26 +544,23 @@ app.get('/api/contacts', (req, res) => {
     try {
         const { days } = req.query;
         const contacts = getContacts();
-        
+
         let filteredContacts = contacts;
-        
-        // Filtrar por días si se especifica
+
         if (days) {
             const daysAgo = new Date();
             daysAgo.setDate(daysAgo.getDate() - parseInt(days));
-            
-            filteredContacts = contacts.filter(contact => 
+            filteredContacts = contacts.filter(contact =>
                 new Date(contact.lastMessage) >= daysAgo
             );
         }
-        
-        // Ordenar por último mensaje (más reciente primero)
-        const sortedContacts = filteredContacts.sort((a, b) => 
+
+        const sortedContacts = filteredContacts.sort((a, b) =>
             new Date(b.lastMessage) - new Date(a.lastMessage)
         );
-        
-        res.json({ 
-            success: true, 
+
+        res.json({
+            success: true,
             contacts: sortedContacts,
             total: contacts.length,
             filtered: filteredContacts.length,
@@ -656,71 +571,53 @@ app.get('/api/contacts', (req, res) => {
     }
 });
 
+// Funciones auxiliares para envío masivo
+const getRandomDelay = (min, max) => {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+};
+
+const shuffleArray = (array) => {
+    const shuffled = [...array];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    return shuffled;
+};
+
 // Ruta para enviar mensajes masivos con imagen
 app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCount: 1 }, { name: 'image', maxCount: 1 }]), async (req, res) => {
     if (!isClientReady) {
         return res.status(400).json({ error: 'Cliente de WhatsApp no está listo' });
     }
 
-    const { 
-        message, 
-        numbers, 
-        minDelay = 3, 
-        maxDelay = 6, 
-        longPauseInterval = 10, 
+    const {
+        message,
+        numbers,
+        minDelay = 3,
+        maxDelay = 6,
+        longPauseInterval = 10,
         longPauseDelay = 30,
-        randomizeOrder = false 
+        randomizeOrder = false
     } = req.body;
-    
+
     const imageFile = req.files && req.files.image ? req.files.image[0] : null;
     const csvFile = req.files && req.files.csvFile ? req.files.csvFile[0] : null;
-    
+
     if (!imageFile) {
         return res.status(400).json({ error: 'No se ha subido ninguna imagen' });
     }
-    
-    // Convertir segundos a milisegundos
+
     const minDelayMs = parseInt(minDelay) * 1000;
     const maxDelayMs = parseInt(maxDelay) * 1000;
     const longPauseDelayMs = parseInt(longPauseDelay) * 1000;
     let phoneNumbers = [];
-    
-    // Función para generar delay aleatorio
-    const getRandomDelay = (min, max) => {
-        return Math.floor(Math.random() * (max - min + 1)) + min;
-    };
-    
-    // Función para mezclar array aleatoriamente
-    const shuffleArray = (array) => {
-        const shuffled = [...array];
-        for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-        }
-        return shuffled;
-    };
-    
-    // Función para normalizar números de teléfono
-    const normalizePhoneNumber = (number) => {
-        // Remover espacios, guiones y otros caracteres
-        let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
-        
-        // Si el número ya tiene formato internacional (empieza con código de país)
-        if (cleanNumber.length >= 10 && /^\d+$/.test(cleanNumber)) {
-            return cleanNumber;
-        }
-        
-        return cleanNumber;
-    };
 
     try {
-        // Si se subió un archivo CSV
         if (csvFile) {
             const rawNumbers = await parseCSV(csvFile.path);
             phoneNumbers = rawNumbers.map(num => normalizePhoneNumber(num)).filter(num => num);
         } else if (numbers) {
-            // Si se proporcionaron números directamente
-            // Asegurar que numbers sea una cadena de texto
             const numbersString = typeof numbers === 'string' ? numbers : String(numbers);
             phoneNumbers = numbersString.split('\n')
                 .map(num => normalizePhoneNumber(num.trim()))
@@ -731,7 +628,6 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
             return res.status(400).json({ error: 'No se proporcionaron números de teléfono' });
         }
 
-        // Mezclar orden si está habilitado
         if (randomizeOrder) {
             phoneNumbers = shuffleArray(phoneNumbers);
         }
@@ -739,14 +635,7 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
         const results = [];
         const startTime = Date.now();
         const campaignId = uuidv4();
-        
-        // Crear el objeto MessageMedia desde el archivo subido
-        const media = MessageMedia.fromFilePath(imageFile.path);
-        
-        // Forzar el tipo MIME para asegurar que se envíe como imagen
-        media.mimetype = imageFile.mimetype;
-        
-        // Crear objeto de campaña
+
         const campaignData = {
             id: campaignId,
             startTime: new Date().toISOString(),
@@ -754,38 +643,32 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
             totalNumbers: phoneNumbers.length,
             numbers: phoneNumbers,
             hasImage: true,
-            config: {
-                minDelay,
-                maxDelay,
-                longPauseInterval,
-                longPauseDelay,
-                randomizeOrder
-            },
+            config: { minDelay, maxDelay, longPauseInterval, longPauseDelay, randomizeOrder },
             results: [],
             status: 'in_progress'
         };
-        
+
         console.log(`Iniciando campaña con imagen ${campaignId} con ${phoneNumbers.length} números`);
-        
+
         for (let i = 0; i < phoneNumbers.length; i++) {
             const number = phoneNumbers[i];
             try {
-                const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-                await client.sendMessage(chatId, media, { caption: message || '' });
-                const result = { 
-                    number, 
-                    status: 'enviado', 
+                const jid = numberToJid(number);
+                await sendImageMessage(jid, imageFile.path, message, imageFile.mimetype);
+
+                const result = {
+                    number,
+                    status: 'enviado',
                     timestamp: new Date().toISOString(),
                     index: i + 1
                 };
                 results.push(result);
                 campaignData.results.push(result);
-                
-                // Emitir progreso con información adicional
+
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 const avgTime = elapsed / (i + 1);
                 const estimatedRemaining = Math.floor(avgTime * (phoneNumbers.length - i - 1));
-                
+
                 io.emit('progress', {
                     current: i + 1,
                     total: phoneNumbers.length,
@@ -793,19 +676,13 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
                     elapsed: elapsed,
                     estimatedRemaining: estimatedRemaining
                 });
-                
-                // No hacer pausa después del último mensaje
+
                 if (i < phoneNumbers.length - 1) {
-                    // Pausa larga cada X mensajes
                     if ((i + 1) % parseInt(longPauseInterval) === 0) {
                         console.log(`Pausa larga de ${longPauseDelayMs/1000} segundos después de ${i + 1} mensajes`);
-                        io.emit('longPause', {
-                            current: i + 1,
-                            pauseDuration: longPauseDelayMs/1000
-                        });
+                        io.emit('longPause', { current: i + 1, pauseDuration: longPauseDelayMs/1000 });
                         await new Promise(resolve => setTimeout(resolve, longPauseDelayMs));
                     } else {
-                        // Pausa aleatoria normal
                         const delay = getRandomDelay(minDelayMs, maxDelayMs);
                         console.log(`Esperando ${delay/1000} segundos antes del siguiente mensaje`);
                         await new Promise(resolve => setTimeout(resolve, delay));
@@ -813,9 +690,9 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
                 }
             } catch (error) {
                 console.error(`Error enviando imagen a ${number}:`, error);
-                const result = { 
-                    number, 
-                    status: 'error', 
+                const result = {
+                    number,
+                    status: 'error',
                     error: error.message,
                     timestamp: new Date().toISOString(),
                     index: i + 1
@@ -824,8 +701,7 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
                 campaignData.results.push(result);
             }
         }
-        
-        // Finalizar campaña
+
         campaignData.endTime = new Date().toISOString();
         campaignData.duration = Date.now() - startTime;
         campaignData.status = 'completed';
@@ -835,36 +711,17 @@ app.post('/send-bulk-with-image', uploadImage.fields([{ name: 'csvFile', maxCoun
             failed: results.filter(r => r.status === 'error').length,
             successRate: ((results.filter(r => r.status === 'enviado').length / phoneNumbers.length) * 100).toFixed(2)
         };
-        
+
         saveCampaign(campaignData);
-        
-        // Eliminar el archivo temporal de imagen después de la campaña
-        if (fs.existsSync(imageFile.path)) {
-            fs.unlinkSync(imageFile.path);
-        }
-        
-        // Eliminar archivo CSV temporal si existe
-        if (csvFile && fs.existsSync(csvFile.path)) {
-            fs.unlinkSync(csvFile.path);
-        }
-        
-        res.json({
-            success: true,
-            results,
-            campaignId,
-            stats: campaignData.stats
-        });
+
+        if (fs.existsSync(imageFile.path)) fs.unlinkSync(imageFile.path);
+        if (csvFile && fs.existsSync(csvFile.path)) fs.unlinkSync(csvFile.path);
+
+        res.json({ success: true, results, campaignId, stats: campaignData.stats });
     } catch (error) {
         console.error('Error en campaña con imagen:', error);
-        
-        // Limpiar archivos temporales en caso de error
-        if (imageFile && fs.existsSync(imageFile.path)) {
-            fs.unlinkSync(imageFile.path);
-        }
-        if (csvFile && fs.existsSync(csvFile.path)) {
-            fs.unlinkSync(csvFile.path);
-        }
-        
+        if (imageFile && fs.existsSync(imageFile.path)) fs.unlinkSync(imageFile.path);
+        if (csvFile && fs.existsSync(csvFile.path)) fs.unlinkSync(csvFile.path);
         res.status(500).json({ error: 'Error en campaña con imagen: ' + error.message });
     }
 });
@@ -874,58 +731,26 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
         return res.status(400).json({ error: 'Cliente de WhatsApp no está listo' });
     }
 
-    const { 
-        message, 
-        numbers, 
-        minDelay = 3, 
-        maxDelay = 6, 
-        longPauseInterval = 10, 
+    const {
+        message,
+        numbers,
+        minDelay = 3,
+        maxDelay = 6,
+        longPauseInterval = 10,
         longPauseDelay = 30,
-        randomizeOrder = false 
+        randomizeOrder = false
     } = req.body;
-    
-    // Convertir segundos a milisegundos
+
     const minDelayMs = parseInt(minDelay) * 1000;
     const maxDelayMs = parseInt(maxDelay) * 1000;
     const longPauseDelayMs = parseInt(longPauseDelay) * 1000;
     let phoneNumbers = [];
-    
-    // Función para generar delay aleatorio
-    const getRandomDelay = (min, max) => {
-        return Math.floor(Math.random() * (max - min + 1)) + min;
-    };
-    
-    // Función para mezclar array aleatoriamente
-    const shuffleArray = (array) => {
-        const shuffled = [...array];
-        for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-        }
-        return shuffled;
-    };
-    
-    // Función para normalizar números de teléfono
-    const normalizePhoneNumber = (number) => {
-        // Remover espacios, guiones y otros caracteres
-        let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
-        
-        // Si el número ya tiene formato internacional (empieza con código de país)
-        if (cleanNumber.length >= 10 && /^\d+$/.test(cleanNumber)) {
-            return cleanNumber;
-        }
-        
-        return cleanNumber;
-    };
 
     try {
-        // Si se subió un archivo CSV
         if (req.file) {
             const rawNumbers = await parseCSV(req.file.path);
             phoneNumbers = rawNumbers.map(num => normalizePhoneNumber(num)).filter(num => num);
         } else if (numbers) {
-            // Si se proporcionaron números directamente
-            // Asegurar que numbers sea una cadena de texto
             const numbersString = typeof numbers === 'string' ? numbers : String(numbers);
             phoneNumbers = numbersString.split('\n')
                 .map(num => normalizePhoneNumber(num.trim()))
@@ -936,7 +761,6 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
             return res.status(400).json({ error: 'No se proporcionaron números de teléfono' });
         }
 
-        // Mezclar orden si está habilitado
         if (randomizeOrder) {
             phoneNumbers = shuffleArray(phoneNumbers);
         }
@@ -944,46 +768,39 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
         const results = [];
         const startTime = Date.now();
         const campaignId = uuidv4();
-        
-        // Crear objeto de campaña
+
         const campaignData = {
             id: campaignId,
             startTime: new Date().toISOString(),
             message: message,
             totalNumbers: phoneNumbers.length,
             numbers: phoneNumbers,
-            config: {
-                minDelay,
-                maxDelay,
-                longPauseInterval,
-                longPauseDelay,
-                randomizeOrder
-            },
+            config: { minDelay, maxDelay, longPauseInterval, longPauseDelay, randomizeOrder },
             results: [],
             status: 'in_progress'
         };
-        
+
         console.log(`Iniciando campaña ${campaignId} con ${phoneNumbers.length} números`);
-        
+
         for (let i = 0; i < phoneNumbers.length; i++) {
             const number = phoneNumbers[i];
             try {
-                const chatId = number.includes('@c.us') ? number : `${number}@c.us`;
-                await client.sendMessage(chatId, message);
-                const result = { 
-                    number, 
-                    status: 'enviado', 
+                const jid = numberToJid(number);
+                await sendTextMessage(jid, message);
+
+                const result = {
+                    number,
+                    status: 'enviado',
                     timestamp: new Date().toISOString(),
                     index: i + 1
                 };
                 results.push(result);
                 campaignData.results.push(result);
-                
-                // Emitir progreso con información adicional
+
                 const elapsed = Math.floor((Date.now() - startTime) / 1000);
                 const avgTime = elapsed / (i + 1);
                 const estimatedRemaining = Math.floor(avgTime * (phoneNumbers.length - i - 1));
-                
+
                 io.emit('progress', {
                     current: i + 1,
                     total: phoneNumbers.length,
@@ -991,19 +808,13 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
                     elapsed: elapsed,
                     estimatedRemaining: estimatedRemaining
                 });
-                
-                // No hacer pausa después del último mensaje
+
                 if (i < phoneNumbers.length - 1) {
-                    // Pausa larga cada X mensajes
                     if ((i + 1) % parseInt(longPauseInterval) === 0) {
                         console.log(`Pausa larga de ${longPauseDelayMs/1000} segundos después de ${i + 1} mensajes`);
-                        io.emit('longPause', {
-                            current: i + 1,
-                            pauseDuration: longPauseDelayMs/1000
-                        });
+                        io.emit('longPause', { current: i + 1, pauseDuration: longPauseDelayMs/1000 });
                         await new Promise(resolve => setTimeout(resolve, longPauseDelayMs));
                     } else {
-                        // Pausa aleatoria normal
                         const delay = getRandomDelay(minDelayMs, maxDelayMs);
                         console.log(`Esperando ${delay/1000} segundos antes del siguiente mensaje`);
                         await new Promise(resolve => setTimeout(resolve, delay));
@@ -1011,9 +822,9 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
                 }
             } catch (error) {
                 console.error(`Error enviando a ${number}:`, error);
-                const result = { 
-                    number, 
-                    status: 'error', 
+                const result = {
+                    number,
+                    status: 'error',
                     error: error.message,
                     timestamp: new Date().toISOString(),
                     index: i + 1
@@ -1023,7 +834,6 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
             }
         }
 
-        // Finalizar campaña
         campaignData.endTime = new Date().toISOString();
         campaignData.duration = Date.now() - startTime;
         campaignData.status = 'completed';
@@ -1033,21 +843,12 @@ app.post('/send-bulk', upload.single('csvFile'), async (req, res) => {
             failed: results.filter(r => r.status === 'error').length,
             successRate: ((results.filter(r => r.status === 'enviado').length / phoneNumbers.length) * 100).toFixed(2)
         };
-        
-        // Guardar campaña
-        saveCampaign(campaignData);
-        
-        // Limpiar archivo temporal
-        if (req.file) {
-            fs.unlinkSync(req.file.path);
-        }
 
-        res.json({ 
-            success: true, 
-            results,
-            campaignId: campaignId,
-            stats: campaignData.stats
-        });
+        saveCampaign(campaignData);
+
+        if (req.file) fs.unlinkSync(req.file.path);
+
+        res.json({ success: true, results, campaignId, stats: campaignData.stats });
     } catch (error) {
         console.error('Error en envío masivo:', error);
         res.status(500).json({ error: 'Error en envío masivo: ' + error.message });
@@ -1061,7 +862,6 @@ function parseCSV(filePath) {
         fs.createReadStream(filePath)
             .pipe(csv())
             .on('data', (row) => {
-                // Buscar columnas que contengan números de teléfono
                 const phoneNumber = row.telefono || row.phone || row.numero || row.number || Object.values(row)[0];
                 if (phoneNumber) {
                     numbers.push(phoneNumber.toString().trim());
@@ -1078,13 +878,11 @@ function parseCSV(filePath) {
 io.on('connection', (socket) => {
     console.log('Cliente conectado - Estado actual: ready=' + isClientReady);
 
-    // Emitir estado actual al cliente que se acaba de conectar
     socket.emit('status', {
         ready: isClientReady,
         qrCode: qrCodeData
     });
 
-    // Si ya está listo, también emitir el evento ready
     if (isClientReady) {
         console.log('Emitiendo evento ready al cliente que se acaba de conectar');
         socket.emit('ready');
@@ -1103,41 +901,23 @@ server.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
 
-// Crear directorios necesarios si no existen
-if (!fs.existsSync('uploads')) {
-    fs.mkdirSync('uploads');
-}
-
-if (!fs.existsSync('uploads/images')) {
-    fs.mkdirSync('uploads/images', { recursive: true });
-}
-
-if (!fs.existsSync('public')) {
-    fs.mkdirSync('public');
-}
-
-if (!fs.existsSync('logs')) {
-    fs.mkdirSync('logs');
-}
-
 // Funciones de logging y seguimiento
 function saveCampaign(campaignData) {
     try {
         const campaignsFile = path.join('logs', 'campaigns.json');
         let campaigns = [];
-        
+
         if (fs.existsSync(campaignsFile)) {
             const data = fs.readFileSync(campaignsFile, 'utf8');
             campaigns = JSON.parse(data);
         }
-        
+
         campaigns.push(campaignData);
         fs.writeFileSync(campaignsFile, JSON.stringify(campaigns, null, 2));
-        
-        // También guardar log detallado
+
         const logFile = path.join('logs', `campaign_${campaignData.id}.json`);
         fs.writeFileSync(logFile, JSON.stringify(campaignData, null, 2));
-        
+
         console.log(`Campaña guardada: ${campaignData.id}`);
     } catch (error) {
         console.error('Error guardando campaña:', error);
@@ -1173,23 +953,19 @@ function getFailedNumbers(campaignId) {
     }
 }
 
-// Función para guardar contactos
 function saveContact(contactData) {
     try {
         const contactsFile = path.join('logs', 'contacts.json');
         let contacts = [];
-        
-        // Leer contactos existentes
+
         if (fs.existsSync(contactsFile)) {
             const data = fs.readFileSync(contactsFile, 'utf8');
             contacts = JSON.parse(data);
         }
-        
-        // Buscar si el contacto ya existe
+
         const existingIndex = contacts.findIndex(c => c.number === contactData.number);
-        
+
         if (existingIndex >= 0) {
-            // Actualizar contacto existente, preservando firstContact
             contacts[existingIndex] = {
                 ...contacts[existingIndex],
                 name: contactData.name,
@@ -1197,28 +973,25 @@ function saveContact(contactData) {
                 isGroup: contactData.isGroup
             };
         } else {
-            // Agregar nuevo contacto
             contacts.push({
                 ...contactData,
                 firstContact: contactData.firstContact || new Date().toISOString()
             });
         }
-        
-        // Guardar contactos actualizados
+
         fs.writeFileSync(contactsFile, JSON.stringify(contacts, null, 2));
     } catch (error) {
         console.error('Error guardando contacto:', error);
     }
 }
 
-// Función para obtener todos los contactos
 function getContacts() {
     try {
         const contactsFile = path.join('logs', 'contacts.json');
         if (!fs.existsSync(contactsFile)) {
             return [];
         }
-        
+
         const data = fs.readFileSync(contactsFile, 'utf8');
         return JSON.parse(data);
     } catch (error) {

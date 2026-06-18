@@ -1,5 +1,6 @@
 node_modules/
 .wwebjs_auth/
+auth_info/
 uploads/
 *.log
 .DS_Store
