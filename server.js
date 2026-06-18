@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const qrcode = require('qrcode');
 const http = require('http');
@@ -8,10 +10,16 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = require('baileys');
+const OpenAI = require('openai');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
+
+// Inicializar OpenAI
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY || ''
+});
 
 // Crear directorios necesarios si no existen
 ['uploads', 'uploads/images', 'public', 'logs', 'auth_info'].forEach(dir => {
@@ -49,6 +57,11 @@ app.get('/dashboard', (req, res) => {
 // Ruta para la página de contactos
 app.get('/contacts', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'contacts.html'));
+});
+
+// Ruta para la página CRM
+app.get('/crm', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'crm.html'));
 });
 
 // Cliente de WhatsApp (Baileys)
@@ -203,13 +216,26 @@ async function initializeWhatsApp() {
                     if (!msg.key.fromMe && msg.key.remoteJid?.endsWith('@s.whatsapp.net')) {
                         const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
                         const pushName = msg.pushName || 'Sin nombre';
+                        const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+
                         const contactData = {
                             number,
                             name: pushName,
                             lastMessage: new Date().toISOString(),
-                            isGroup: false
+                            isGroup: false,
+                            messageText: messageText
                         };
+
                         saveContact(contactData);
+
+                        // Auto-etiquetar con IA si está habilitada
+                        if (process.env.OPENAI_API_KEY) {
+                            try {
+                                await autoLabelContact(number, messageText);
+                            } catch (labelError) {
+                                console.log('No se pudo auto-etiquetar contacto:', labelError.message);
+                            }
+                        }
                     }
                 }
             } catch (error) {
@@ -568,6 +594,120 @@ app.get('/api/contacts', (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: 'Error obteniendo contactos: ' + error.message });
+    }
+});
+
+// Endpoint para obtener contactos con etiquetas (para CRM)
+app.get('/api/crm/contacts', (req, res) => {
+    try {
+        const { label } = req.query;
+        const contacts = getContacts();
+        const labels = getLabels();
+
+        let filteredContacts = contacts.map(contact => ({
+            ...contact,
+            tags: labels[contact.number] || []
+        }));
+
+        if (label) {
+            filteredContacts = filteredContacts.filter(contact =>
+                contact.tags.includes(label)
+            );
+        }
+
+        const sortedContacts = filteredContacts.sort((a, b) =>
+            new Date(b.lastMessage) - new Date(a.lastMessage)
+        );
+
+        res.json({
+            success: true,
+            contacts: sortedContacts,
+            total: contacts.length,
+            filtered: filteredContacts.length,
+            allLabels: getAllLabels()
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo CRM: ' + error.message });
+    }
+});
+
+// Endpoint para obtener etiquetas de un contacto específico
+app.get('/api/crm/contact/:number/labels', (req, res) => {
+    try {
+        const { number } = req.params;
+        const labels = getLabels();
+        const contactLabels = labels[number] || [];
+
+        res.json({
+            success: true,
+            number,
+            labels: contactLabels,
+            allLabels: getAllLabels()
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo etiquetas: ' + error.message });
+    }
+});
+
+// Endpoint para agregar etiqueta a un contacto
+app.post('/api/crm/contact/:number/label', (req, res) => {
+    try {
+        const { number } = req.params;
+        const { label } = req.body;
+
+        if (!label) {
+            return res.status(400).json({ error: 'Etiqueta requerida' });
+        }
+
+        addLabel(number, label);
+
+        res.json({
+            success: true,
+            message: 'Etiqueta agregada',
+            number,
+            label
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error agregando etiqueta: ' + error.message });
+    }
+});
+
+// Endpoint para eliminar etiqueta de un contacto
+app.delete('/api/crm/contact/:number/label/:label', (req, res) => {
+    try {
+        const { number, label } = req.params;
+
+        removeLabel(number, label);
+
+        res.json({
+            success: true,
+            message: 'Etiqueta eliminada',
+            number,
+            label
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error eliminando etiqueta: ' + error.message });
+    }
+});
+
+// Endpoint para obtener todas las etiquetas
+app.get('/api/crm/labels', (req, res) => {
+    try {
+        const allLabels = getAllLabels();
+        const labelStats = {};
+
+        for (const label of allLabels) {
+            const labels = getLabels();
+            labelStats[label] = Object.values(labels).filter(tags => tags.includes(label)).length;
+        }
+
+        res.json({
+            success: true,
+            labels: allLabels,
+            stats: labelStats
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error obteniendo etiquetas: ' + error.message });
     }
 });
 
@@ -997,5 +1137,99 @@ function getContacts() {
     } catch (error) {
         console.error('Error obteniendo contactos:', error);
         return [];
+    }
+}
+
+// Funciones para gestión de etiquetas
+function getLabels() {
+    try {
+        const labelsFile = path.join('logs', 'labels.json');
+        if (!fs.existsSync(labelsFile)) {
+            return {};
+        }
+
+        const data = fs.readFileSync(labelsFile, 'utf8');
+        return JSON.parse(data);
+    } catch (error) {
+        console.error('Error obteniendo etiquetas:', error);
+        return {};
+    }
+}
+
+function saveLabels(labels) {
+    try {
+        const labelsFile = path.join('logs', 'labels.json');
+        fs.writeFileSync(labelsFile, JSON.stringify(labels, null, 2));
+    } catch (error) {
+        console.error('Error guardando etiquetas:', error);
+    }
+}
+
+function addLabel(number, label) {
+    const labels = getLabels();
+    if (!labels[number]) {
+        labels[number] = [];
+    }
+    if (!labels[number].includes(label)) {
+        labels[number].push(label);
+    }
+    saveLabels(labels);
+}
+
+function removeLabel(number, label) {
+    const labels = getLabels();
+    if (labels[number]) {
+        labels[number] = labels[number].filter(l => l !== label);
+        if (labels[number].length === 0) {
+            delete labels[number];
+        }
+    }
+    saveLabels(labels);
+}
+
+function getAllLabels() {
+    const labels = getLabels();
+    const allLabels = new Set();
+    Object.values(labels).forEach(tags => {
+        tags.forEach(tag => allLabels.add(tag));
+    });
+    return Array.from(allLabels).sort();
+}
+
+// Función para auto-etiquetar con IA
+async function autoLabelContact(number, messageText) {
+    if (!messageText || messageText.length < 5) return;
+    if (!process.env.OPENAI_API_KEY) return;
+
+    try {
+        const response = await openai.chat.completions.create({
+            model: 'gpt-3.5-turbo',
+            messages: [
+                {
+                    role: 'system',
+                    content: `Eres un asistente que analiza mensajes de clientes y asigna etiquetas automáticas.
+Las etiquetas disponibles son: "Interesado", "Compró", "Pregunta", "Problema", "Seguimiento", "Otro".
+Responde SOLO con una lista de etiquetas separadas por comas, sin explicación adicional.
+Si no hay una etiqueta clara, responde "Otro".`
+                },
+                {
+                    role: 'user',
+                    content: `Analiza este mensaje y asigna etiquetas: "${messageText}"`
+                }
+            ],
+            max_tokens: 50,
+            temperature: 0.3
+        });
+
+        const labelsText = response.choices[0].message.content.trim();
+        const tagsArray = labelsText.split(',').map(tag => tag.trim()).filter(tag => tag);
+
+        for (const tag of tagsArray) {
+            addLabel(number, tag);
+        }
+
+        console.log(`Auto-etiquetado contacto ${number}: ${tagsArray.join(', ')}`);
+    } catch (error) {
+        console.error(`Error auto-etiquetando contacto ${number}:`, error.message);
     }
 }

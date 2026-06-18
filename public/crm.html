@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRM - Mensajes Masivos WhatsApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .badge-custom {
+            display: inline-block;
+            margin: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .badge-custom:hover {
+            opacity: 0.8;
+            transform: scale(1.05);
+        }
+        .contact-card {
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+            cursor: pointer;
+        }
+        .contact-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+        }
+        .contact-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #25d366, #128c7e);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+        .tag-input {
+            display: flex;
+            gap: 5px;
+            margin-top: 10px;
+        }
+        .tag-input input {
+            flex: 1;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 5px 10px;
+            font-size: 0.9rem;
+        }
+        .tag-input button {
+            padding: 5px 10px;
+            font-size: 0.9rem;
+        }
+        .stats-card {
+            background: linear-gradient(45deg, #25d366, #128c7e);
+            color: white;
+            border-radius: 15px;
+        }
+        .label-badge {
+            background: #25d366;
+            color: white;
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 3px;
+            margin: 2px;
+            font-size: 0.85rem;
+        }
+        .label-badge .btn-remove {
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            margin-left: 4px;
+            padding: 0;
+            font-size: 0.8rem;
+        }
+        .modal-body {
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fab fa-whatsapp me-2"></i>
+                Mensajes Masivos WhatsApp
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">Enviar Mensajes</a>
+                <a class="nav-link" href="/dashboard">Dashboard</a>
+                <a class="nav-link" href="/contacts">Contactos</a>
+                <a class="nav-link active" href="/crm">CRM</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2><i class="fas fa-tags me-2"></i>CRM - Gestión de Contactos</h2>
+                <p class="text-muted">Organiza tus contactos con etiquetas inteligentes basadas en IA</p>
+            </div>
+        </div>
+
+        <!-- Estadísticas de Etiquetas -->
+        <div class="row mb-4" id="label-stats-container">
+            <div class="col-md-3 mb-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <h3 class="mb-0" id="total-contacts-stat">0</h3>
+                        <small>Total Contactos</small>
+                    </div>
+                </div>
+            </div>
+            <div id="label-cards"></div>
+        </div>
+
+        <!-- Filtros y Búsqueda -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="input-group">
+                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                    <input type="text" class="form-control" id="search-input" placeholder="Buscar por nombre o número...">
+                </div>
+            </div>
+            <div class="col-md-6">
+                <select class="form-select" id="label-filter">
+                    <option value="">Todos los contactos</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Acción Masiva -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <button class="btn btn-success" id="bulk-action-btn" style="display: none;">
+                    <i class="fas fa-envelope me-2"></i>Enviar mensaje masivo a filtrados
+                </button>
+            </div>
+        </div>
+
+        <!-- Lista de Contactos -->
+        <div class="row" id="contacts-container">
+            <div class="col-12 text-center py-5">
+                <div class="spinner-border text-success" role="status">
+                    <span class="visually-hidden">Cargando...</span>
+                </div>
+                <p class="mt-2 text-muted">Cargando contactos...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal para editar etiquetas -->
+    <div class="modal fade" id="editLabelsModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Editar Etiquetas</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">Contacto: <strong id="modal-contact-name"></strong></label>
+                        <div class="text-muted">+<span id="modal-contact-number"></span></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Etiquetas Actuales:</label>
+                        <div id="current-labels"></div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Agregar Etiqueta:</label>
+                        <div class="tag-input">
+                            <select class="form-select" id="available-labels-select">
+                                <option value="">Selecciona una etiqueta...</option>
+                            </select>
+                            <button class="btn btn-success" onclick="addLabelToContact()">
+                                <i class="fas fa-plus"></i> Agregar
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let allContacts = [];
+        let filteredContacts = [];
+        let allLabels = [];
+        let editingNumber = null;
+        const editLabelsModal = new bootstrap.Modal(document.getElementById('editLabelsModal'));
+
+        // Cargar contactos al iniciar
+        document.addEventListener('DOMContentLoaded', () => {
+            loadContacts();
+            loadLabels();
+        });
+
+        async function loadContacts(label = null) {
+            try {
+                const url = label ? `/api/crm/contacts?label=${label}` : '/api/crm/contacts';
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.success) {
+                    allContacts = data.contacts;
+                    allLabels = data.allLabels || [];
+                    filteredContacts = [...allContacts];
+
+                    displayContacts();
+                    updateStats(data);
+                    updateLabelFilter();
+                } else {
+                    showError('Error cargando contactos: ' + data.error);
+                }
+            } catch (error) {
+                showError('Error de conexión: ' + error.message);
+            }
+        }
+
+        async function loadLabels() {
+            try {
+                const response = await fetch('/api/crm/labels');
+                const data = await response.json();
+
+                if (data.success) {
+                    allLabels = data.labels || [];
+                    displayLabelStats(data.stats);
+                }
+            } catch (error) {
+                console.error('Error cargando etiquetas:', error);
+            }
+        }
+
+        function displayLabelStats(stats) {
+            const container = document.getElementById('label-cards');
+            container.innerHTML = '';
+
+            if (!stats || Object.keys(stats).length === 0) {
+                return;
+            }
+
+            for (const [label, count] of Object.entries(stats).sort((a, b) => b[1] - a[1])) {
+                const card = document.createElement('div');
+                card.className = 'col-md-3 mb-3';
+                card.innerHTML = `
+                    <div class="card stats-card cursor-pointer" onclick="filterByLabel('${label}')">
+                        <div class="card-body text-center">
+                            <h5 class="mb-0">${count}</h5>
+                            <small>${label}</small>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            }
+        }
+
+        function updateLabelFilter() {
+            const select = document.getElementById('label-filter');
+            const currentValue = select.value;
+            select.innerHTML = '<option value="">Todos los contactos</option>';
+
+            for (const label of allLabels) {
+                const option = document.createElement('option');
+                option.value = label;
+                option.textContent = label;
+                select.appendChild(option);
+            }
+
+            select.value = currentValue;
+            select.addEventListener('change', (e) => {
+                loadContacts(e.target.value);
+            });
+        }
+
+        function displayContacts() {
+            const container = document.getElementById('contacts-container');
+
+            if (filteredContacts.length === 0) {
+                container.innerHTML = `
+                    <div class="col-12 text-center py-5">
+                        <i class="fas fa-inbox fa-4x text-muted mb-3"></i>
+                        <h4 class="text-muted">No hay contactos</h4>
+                    </div>
+                `;
+                document.getElementById('bulk-action-btn').style.display = 'none';
+                return;
+            }
+
+            document.getElementById('bulk-action-btn').style.display = 'inline-block';
+
+            const contactsHTML = filteredContacts.map(contact => {
+                const initials = getInitials(contact.name);
+                const lastMessageDate = formatDate(contact.lastMessage);
+
+                return `
+                    <div class="col-md-6 col-lg-4 mb-3">
+                        <div class="card contact-card h-100">
+                            <div class="card-body">
+                                <div class="d-flex align-items-start">
+                                    <div class="contact-avatar me-3">
+                                        ${initials}
+                                    </div>
+                                    <div class="flex-grow-1">
+                                        <h6 class="mb-1">${contact.name}</h6>
+                                        <div class="text-muted small">+${contact.number}</div>
+                                        <div class="text-muted small">
+                                            <i class="fas fa-clock me-1"></i>${lastMessageDate}
+                                        </div>
+                                        <div class="mt-2">
+                                            ${contact.tags && contact.tags.length > 0 ?
+                                                contact.tags.map(tag => `<span class="label-badge">${tag}</span>`).join('') :
+                                                '<span class="text-muted small">Sin etiquetas</span>'
+                                            }
+                                        </div>
+                                        <button class="btn btn-sm btn-outline-success mt-2" onclick="openEditLabels('${contact.number}', '${contact.name}')">
+                                            <i class="fas fa-edit me-1"></i>Editar
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = contactsHTML;
+
+            // Agregar búsqueda
+            document.getElementById('search-input').addEventListener('input', filterContacts);
+        }
+
+        function filterByLabel(label) {
+            document.getElementById('label-filter').value = label;
+            loadContacts(label);
+        }
+
+        function filterContacts() {
+            const searchTerm = document.getElementById('search-input').value.toLowerCase();
+
+            filteredContacts = allContacts.filter(contact =>
+                contact.name.toLowerCase().includes(searchTerm) ||
+                contact.number.includes(searchTerm)
+            );
+
+            displayContacts();
+        }
+
+        function updateStats(data) {
+            document.getElementById('total-contacts-stat').textContent = data.total || 0;
+        }
+
+        function openEditLabels(number, name) {
+            editingNumber = number;
+            document.getElementById('modal-contact-name').textContent = name;
+            document.getElementById('modal-contact-number').textContent = number;
+
+            // Cargar etiquetas actuales
+            const contact = allContacts.find(c => c.number === number);
+            const currentLabels = contact?.tags || [];
+
+            const labelsDiv = document.getElementById('current-labels');
+            labelsDiv.innerHTML = currentLabels.length > 0 ?
+                currentLabels.map(label => `
+                    <span class="label-badge">
+                        ${label}
+                        <button type="button" class="btn-remove" onclick="removeLabelFromContact('${number}', '${label}')">
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </span>
+                `).join('') :
+                '<p class="text-muted">Sin etiquetas</p>';
+
+            // Cargar etiquetas disponibles
+            const availableSelect = document.getElementById('available-labels-select');
+            availableSelect.innerHTML = '<option value="">Selecciona una etiqueta...</option>';
+            for (const label of allLabels) {
+                if (!currentLabels.includes(label)) {
+                    const option = document.createElement('option');
+                    option.value = label;
+                    option.textContent = label;
+                    availableSelect.appendChild(option);
+                }
+            }
+
+            editLabelsModal.show();
+        }
+
+        async function addLabelToContact() {
+            const label = document.getElementById('available-labels-select').value;
+            if (!label) return;
+
+            try {
+                const response = await fetch(`/api/crm/contact/${editingNumber}/label`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ label })
+                });
+
+                if (response.ok) {
+                    loadContacts();
+                    loadLabels();
+                    openEditLabels(editingNumber, document.getElementById('modal-contact-name').textContent);
+                    showAlert('Etiqueta agregada', 'success');
+                }
+            } catch (error) {
+                showAlert('Error agregando etiqueta: ' + error.message, 'danger');
+            }
+        }
+
+        async function removeLabelFromContact(number, label) {
+            try {
+                const response = await fetch(`/api/crm/contact/${number}/label/${label}`, {
+                    method: 'DELETE'
+                });
+
+                if (response.ok) {
+                    loadContacts();
+                    loadLabels();
+                    openEditLabels(number, document.getElementById('modal-contact-name').textContent);
+                    showAlert('Etiqueta eliminada', 'success');
+                }
+            } catch (error) {
+                showAlert('Error eliminando etiqueta: ' + error.message, 'danger');
+            }
+        }
+
+        function getInitials(name) {
+            if (!name || name === 'Sin nombre') return '?';
+            return name.split(' ').map(word => word[0]).join('').toUpperCase().substring(0, 2);
+        }
+
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            const now = new Date();
+            const diffTime = Math.abs(now - date);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+            if (diffDays === 1) return 'Hoy';
+            if (diffDays === 2) return 'Ayer';
+            if (diffDays <= 7) return `Hace ${diffDays - 1} días`;
+            return date.toLocaleDateString('es-ES');
+        }
+
+        function showAlert(message, type = 'info') {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+            alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+
+            document.body.appendChild(alertDiv);
+
+            setTimeout(() => {
+                if (alertDiv.parentNode) {
+                    alertDiv.parentNode.removeChild(alertDiv);
+                }
+            }, 5000);
+        }
+
+        function showError(message) {
+            const container = document.getElementById('contacts-container');
+            container.innerHTML = `
+                <div class="col-12 text-center py-5">
+                    <i class="fas fa-exclamation-triangle fa-4x text-warning mb-3"></i>
+                    <h4 class="text-muted">Error cargando datos</h4>
+                    <p class="text-muted">${message}</p>
+                    <button class="btn btn-success" onclick="loadContacts()">
+                        <i class="fas fa-refresh me-2"></i>Reintentar
+                    </button>
+                </div>
+            `;
+        }
+
+        // Manejador para envío masivo
+        document.getElementById('bulk-action-btn').addEventListener('click', () => {
+            const numbers = filteredContacts.map(c => c.number).join('\n');
+            const csvContent = numbers;
+
+            // Guardar en localStorage para la página de envío
+            localStorage.setItem('bulkNumbers', csvContent);
+            localStorage.setItem('bulkMessage', '');
+
+            window.location.href = '/#bulk-section';
+            setTimeout(() => {
+                alert('Copia los contactos desde CRM. Ahora ve a Enviar Mensajes y pega los números.');
+            }, 500);
+        });
+    </script>
+</body>
+</html>
