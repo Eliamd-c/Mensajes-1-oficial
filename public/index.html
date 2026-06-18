@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mensajes Masivos WhatsApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .qr-container {
+            text-align: center;
+            padding: 40px;
+            border: 3px solid #28a745;
+            border-radius: 15px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e8f5e9 100%);
+            box-shadow: 0 8px 16px rgba(40, 167, 69, 0.2);
+        }
+        .qr-container h6 {
+            color: #28a745;
+            font-weight: 600;
+            margin-bottom: 25px;
+            font-size: 1.1rem;
+        }
+        .qr-wrapper {
+            display: inline-block;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        .qr-code {
+            max-width: 280px;
+            width: 100%;
+            height: auto;
+        }
+        .qr-instructions {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e8f5e9;
+            border-left: 4px solid #28a745;
+            border-radius: 5px;
+            text-align: left;
+        }
+        .qr-instructions ol {
+            margin-bottom: 0;
+        }
+        .qr-instructions li {
+            margin-bottom: 8px;
+        }
+        .spinner-border-sm {
+            width: 1rem;
+            height: 1rem;
+            border-width: 0.2em;
+        }
+        .qr-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 320px;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .qr-success-animation {
+            animation: scaleIn 0.5s ease-out;
+        }
+        @keyframes scaleIn {
+            from {
+                opacity: 0;
+                transform: scale(0.8);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #28a745; }
+        .status-disconnected { background-color: #dc3545; }
+        .status-connecting { background-color: #ffc107; }
+        .progress-container {
+            display: none;
+            margin-top: 20px;
+        }
+        .message-area {
+            min-height: 120px;
+        }
+        .card {
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: none;
+        }
+        .btn-whatsapp {
+            background-color: #25d366;
+            border-color: #25d366;
+            color: white;
+        }
+        .btn-whatsapp:hover {
+            background-color: #128c7e;
+            border-color: #128c7e;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header bg-success text-white">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <h1 class="h3 mb-0">
+                                <i class="fab fa-whatsapp me-2"></i>
+                                Mensajes Masivos WhatsApp
+                            </h1>
+                            <div class="d-flex gap-2">
+                                <a href="/dashboard" class="btn btn-outline-light btn-sm">
+                                    <i class="fas fa-chart-line me-2"></i>
+                                    Dashboard
+                                </a>
+                                <a href="/contacts" class="btn btn-outline-light btn-sm">
+                                    <i class="fas fa-address-book me-2"></i>
+                                    Contactos
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row align-items-center">
+                            <div class="col-lg-6 mb-4 mb-lg-0">
+                                <h5 class="mb-3">
+                                    <i class="fas fa-wifi me-2"></i>Estado de Conexión
+                                </h5>
+                                <p id="status" class="fs-5">
+                                    <span class="status-indicator status-connecting"></span>
+                                    Conectando...
+                                </p>
+                                <button id="request-qr-btn" class="btn btn-success btn-lg mt-3" style="display: none;">
+                                    <i class="fas fa-qrcode me-2"></i>
+                                    Solicitar Código QR
+                                </button>
+                            </div>
+                            <div class="col-lg-6" id="qr-section" style="display: none;">
+                                <div class="qr-container">
+                                    <h6>
+                                        <i class="fas fa-mobile-alt me-2"></i>
+                                        Conecta tu Celular
+                                    </h6>
+                                    <div class="qr-wrapper">
+                                        <img id="qr-code" src="" alt="QR Code" class="qr-code">
+                                    </div>
+                                    <div class="qr-instructions">
+                                        <strong>Instrucciones:</strong>
+                                        <ol>
+                                            <li>Abre WhatsApp en tu celular</li>
+                                            <li>Ve a <strong>Ajustes → Dispositivos vinculados → Vincular dispositivo</strong></li>
+                                            <li>Apunta la cámara al código QR superior</li>
+                                            <li>¡Espera a que se sincronice!</li>
+                                        </ol>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row" id="main-content" style="display: none;">
+            <!-- Mensaje Individual -->
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-user me-2"></i>
+                            Mensaje Individual
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="single-message-form">
+                            <div class="mb-3">
+                                <label for="single-number" class="form-label">
+                                    <i class="fas fa-phone me-2"></i>
+                                    Número de Teléfono (formato internacional)
+                                </label>
+                                <input type="tel" class="form-control" id="single-number" 
+                                       placeholder="Ej: 573123514265" required>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Formato: código de país + número (ej: 573123514265 para Colombia)
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="single-message" class="form-label">Mensaje</label>
+                                <textarea class="form-control message-area" id="single-message" 
+                                          placeholder="Escribe tu mensaje aquí..." required></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="single-image" class="form-label">
+                                    <i class="fas fa-image me-2"></i>
+                                    Imagen (opcional)
+                                </label>
+                                <input type="file" class="form-control" id="single-image" 
+                                       accept="image/*">
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Formatos soportados: JPG, PNG, GIF. Tamaño máximo: 5MB
+                                </div>
+                                <div id="image-preview" class="mt-2" style="display: none;">
+                                    <img id="preview-img" src="" alt="Vista previa" class="img-thumbnail" style="max-width: 200px; max-height: 200px;">
+                                    <button type="button" class="btn btn-sm btn-outline-danger ms-2" id="remove-image">
+                                        <i class="fas fa-times"></i> Quitar
+                                    </button>
+                                </div>
+                            </div>
+                            <button type="submit" class="btn btn-whatsapp">
+                                <i class="fas fa-paper-plane me-2"></i>
+                                Enviar Mensaje
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mensajes Masivos -->
+            <div class="col-md-6 mb-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-users me-2"></i>
+                            Mensajes Masivos
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="bulk-message-form">
+                            <div class="mb-3">
+                                <label for="bulk-message" class="form-label">Mensaje</label>
+                                <textarea class="form-control message-area" id="bulk-message" 
+                                          placeholder="Escribe tu mensaje masivo aquí..." required></textarea>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label for="bulk-image" class="form-label">
+                                    <i class="fas fa-image me-2"></i>
+                                    Imagen (opcional)
+                                </label>
+                                <input type="file" class="form-control" id="bulk-image" 
+                                       accept="image/*">
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Formatos soportados: JPG, PNG, GIF. Tamaño máximo: 5MB
+                                </div>
+                                <div id="bulk-image-preview" class="mt-2" style="display: none;">
+                                    <img id="bulk-preview-img" src="" alt="Vista previa" class="img-thumbnail" style="max-width: 200px; max-height: 200px;">
+                                    <button type="button" class="btn btn-sm btn-outline-danger ms-2" id="remove-bulk-image">
+                                        <i class="fas fa-times"></i> Quitar
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="mb-3">
+                                <label class="form-label">Números de Teléfono</label>
+                                <div class="mb-2">
+                                    <input type="file" class="form-control" id="csv-file" accept=".csv">
+                                    <div class="form-text">Sube un archivo CSV con los números</div>
+                                </div>
+                                <div class="text-center my-2">
+                                    <span class="badge bg-secondary">O</span>
+                                </div>
+                                <label for="bulk-numbers" class="form-label">
+                                    <i class="fas fa-list-ol me-2"></i>
+                                    Números de Teléfono (formato internacional)
+                                </label>
+                                <textarea class="form-control" id="bulk-numbers" rows="4" 
+                                          placeholder="Ingresa los números en formato internacional, uno por línea:\n573123514265\n573001234567\n573007654321\n..."></textarea>
+                                <div class="form-text">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Formato: código de país + número (ej: 573123514265 para Colombia)
+                                </div>
+                            </div>
+                            
+                            <!-- Configuración de Envío Humanizado -->
+                            <div class="card mb-3">
+                                <div class="card-header">
+                                    <h6 class="mb-0">
+                                        <i class="fas fa-cog me-2"></i>
+                                        Configuración de Envío Humanizado
+                                    </h6>
+                                </div>
+                                <div class="card-body">
+                                    <div class="row">
+                                        <div class="col-md-6">
+                                            <label for="min-delay" class="form-label">Delay Mínimo (segundos)</label>
+                                            <input type="number" class="form-control" id="min-delay" value="3" min="1" max="30">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="max-delay" class="form-label">Delay Máximo (segundos)</label>
+                                            <input type="number" class="form-control" id="max-delay" value="6" min="1" max="60">
+                                        </div>
+                                    </div>
+                                    <div class="row mt-2">
+                                        <div class="col-md-6">
+                                            <label for="long-pause-interval" class="form-label">Pausa larga cada X mensajes</label>
+                                            <input type="number" class="form-control" id="long-pause-interval" value="10" min="5" max="50">
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="long-pause-delay" class="form-label">Duración pausa larga (segundos)</label>
+                                            <input type="number" class="form-control" id="long-pause-delay" value="30" min="10" max="300">
+                                        </div>
+                                    </div>
+                                    <div class="row mt-2">
+                                        <div class="col-12">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="randomize-order">
+                                                <label class="form-check-label" for="randomize-order">
+                                                    Enviar en orden aleatorio
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="mt-2">
+                                        <small class="text-muted">
+                                            <i class="fas fa-info-circle me-1"></i>
+                                            Estos parámetros hacen que el envío parezca más humano y evitan bloqueos.
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <button type="submit" class="btn btn-whatsapp">
+                                <i class="fas fa-broadcast-tower me-2"></i>
+                                Enviar Masivo
+                            </button>
+                        </form>
+                        
+                        <div class="progress-container">
+                            <h6>Progreso del Envío</h6>
+                            <div class="progress mb-2">
+                                <div class="progress-bar bg-success" role="progressbar" style="width: 0%"></div>
+                            </div>
+                            <p class="progress-text">0 de 0 mensajes enviados</p>
+                            <p class="current-number"></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Resultados -->
+        <div class="row">
+            <div class="col-12">
+                <div id="results" class="mt-3"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <!-- QRCode.js para generar códigos QR alternativos si es necesario -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode.js/1.5.3/qrcode.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

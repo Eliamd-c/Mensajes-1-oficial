@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - Mensajes Masivos WhatsApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .dashboard-card {
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+        }
+        .dashboard-card:hover {
+            transform: translateY(-2px);
+        }
+        .stat-icon {
+            font-size: 2rem;
+            opacity: 0.8;
+        }
+        .campaign-row {
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .campaign-row:hover {
+            background-color: #f8f9fa;
+        }
+        .status-badge {
+            font-size: 0.8rem;
+        }
+        .success-rate {
+            font-weight: bold;
+        }
+        .success-rate.high { color: #28a745; }
+        .success-rate.medium { color: #ffc107; }
+        .success-rate.low { color: #dc3545; }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fab fa-whatsapp me-2"></i>
+                Mensajes Masivos WhatsApp
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">Enviar Mensajes</a>
+                <a class="nav-link active" href="/dashboard">Dashboard</a>
+                <a class="nav-link" href="/contacts">Contactos</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2><i class="fas fa-chart-line me-2"></i>Dashboard de Campañas</h2>
+                <p class="text-muted">Monitorea el rendimiento de tus campañas de mensajes masivos</p>
+            </div>
+        </div>
+
+        <!-- Estadísticas Generales -->
+        <div class="row mb-4" id="stats-cards">
+            <div class="col-md-3 mb-3">
+                <div class="card dashboard-card bg-primary text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Total Campañas</h6>
+                                <h3 class="mb-0" id="total-campaigns">-</h3>
+                            </div>
+                            <i class="fas fa-bullhorn stat-icon"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card dashboard-card bg-success text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Mensajes Enviados</h6>
+                                <h3 class="mb-0" id="total-sent">-</h3>
+                            </div>
+                            <i class="fas fa-paper-plane stat-icon"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card dashboard-card bg-danger text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Mensajes Fallidos</h6>
+                                <h3 class="mb-0" id="total-failed">-</h3>
+                            </div>
+                            <i class="fas fa-exclamation-triangle stat-icon"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card dashboard-card bg-info text-white">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between">
+                            <div>
+                                <h6 class="card-title">Tasa de Éxito</h6>
+                                <h3 class="mb-0" id="success-rate">-</h3>
+                            </div>
+                            <i class="fas fa-percentage stat-icon"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Historial de Campañas -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card dashboard-card">
+                    <div class="card-header">
+                        <h5 class="mb-0">
+                            <i class="fas fa-history me-2"></i>
+                            Historial de Campañas
+                        </h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Fecha</th>
+                                        <th>Mensaje</th>
+                                        <th>Total</th>
+                                        <th>Enviados</th>
+                                        <th>Fallidos</th>
+                                        <th>Tasa Éxito</th>
+                                        <th>Duración</th>
+                                        <th>Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="campaigns-table">
+                                    <tr>
+                                        <td colspan="8" class="text-center">
+                                            <i class="fas fa-spinner fa-spin me-2"></i>
+                                            Cargando campañas...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Detalles de Campaña -->
+    <div class="modal fade" id="campaignModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Detalles de Campaña</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="campaign-details">
+                    <!-- Contenido dinámico -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                    <button type="button" class="btn btn-warning" id="resend-failed-btn" style="display: none;">
+                        <i class="fas fa-redo me-2"></i>Reenviar Fallidos
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Reenvío -->
+    <div class="modal fade" id="resendModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Reenviar a Números Fallidos</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="resend-form">
+                        <div class="mb-3">
+                            <label for="resend-message" class="form-label">Mensaje</label>
+                            <textarea class="form-control" id="resend-message" rows="4" required></textarea>
+                        </div>
+                        <div class="row">
+                            <div class="col-md-6">
+                                <label for="resend-min-delay" class="form-label">Delay Mínimo (seg)</label>
+                                <input type="number" class="form-control" id="resend-min-delay" value="3" min="1">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="resend-max-delay" class="form-label">Delay Máximo (seg)</label>
+                                <input type="number" class="form-control" id="resend-max-delay" value="6" min="1">
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-warning" id="confirm-resend-btn">
+                        <i class="fas fa-paper-plane me-2"></i>Reenviar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="dashboard.js"></script>
+</body>
+</html>

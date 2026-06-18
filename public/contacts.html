@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Contactos - Mensajes Masivos WhatsApp</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .contact-card {
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            transition: transform 0.2s;
+            cursor: pointer;
+        }
+        .contact-card:hover {
+            transform: translateY(-2px);
+        }
+        .contact-avatar {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: linear-gradient(45deg, #25d366, #128c7e);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+        .contact-info {
+            flex: 1;
+        }
+        .contact-number {
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+        .contact-date {
+            color: #6c757d;
+            font-size: 0.8rem;
+        }
+        .search-box {
+            border-radius: 25px;
+            border: 2px solid #e9ecef;
+            padding: 10px 20px;
+        }
+        .search-box:focus {
+            border-color: #25d366;
+            box-shadow: 0 0 0 0.2rem rgba(37, 211, 102, 0.25);
+        }
+        .stats-card {
+            background: linear-gradient(45deg, #25d366, #128c7e);
+            color: white;
+            border-radius: 15px;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-success">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fab fa-whatsapp me-2"></i>
+                Mensajes Masivos WhatsApp
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/">Enviar Mensajes</a>
+                <a class="nav-link" href="/dashboard">Dashboard</a>
+                <a class="nav-link active" href="/contacts">Contactos</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col-12">
+                <h2><i class="fas fa-address-book me-2"></i>Lista de Contactos</h2>
+                <p class="text-muted" id="contacts-description">Números con los que has conversado</p>
+                <div id="filter-info" class="alert alert-info d-none" role="alert">
+                    <i class="fas fa-info-circle me-2"></i>
+                    <span id="filter-text"></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Estadísticas -->        
+        <div class="row mb-4">
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <i class="fas fa-users fa-2x mb-2" id="stat1-icon"></i>
+                        <h3 class="mb-0" id="total-contacts">0</h3>
+                        <small id="stat1-title">Total Contactos</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <i class="fas fa-filter fa-2x mb-2" id="stat2-icon"></i>
+                        <h3 class="mb-0" id="filtered-contacts">0</h3>
+                        <small id="stat2-title">Filtrados</small>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 mb-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <i class="fas fa-calendar-week fa-2x mb-2" id="stat3-icon"></i>
+                        <h3 class="mb-0" id="recent-contacts">0</h3>
+                        <small id="stat3-title">Últimos 7 días</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Búsqueda y Filtros -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="input-group">
+                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                    <input type="text" class="form-control search-box" id="search-input" placeholder="Buscar por nombre o número...">
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="btn-group w-100" role="group">
+                    <button class="btn btn-outline-primary" onclick="loadContacts()" id="btn-all">
+                        <i class="fas fa-users me-1"></i>Todos
+                    </button>
+                    <button class="btn btn-outline-success" onclick="loadContacts(30)" id="btn-30">
+                        <i class="fas fa-calendar-day me-1"></i>30 días
+                    </button>
+                    <button class="btn btn-outline-info" onclick="loadContacts(7)" id="btn-7">
+                        <i class="fas fa-calendar-week me-1"></i>7 días
+                    </button>
+                    <button class="btn btn-outline-warning" onclick="loadContacts(1)" id="btn-1">
+                        <i class="fas fa-calendar-alt me-1"></i>Hoy
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Lista de contactos -->
+        <div class="row" id="contacts-container">
+            <div class="col-12 text-center py-5">
+                <div class="spinner-border text-success" role="status">
+                    <span class="visually-hidden">Cargando...</span>
+                </div>
+                <p class="mt-2 text-muted">Cargando contactos...</p>
+            </div>
+        </div>
+
+        <!-- Mensaje cuando no hay contactos -->
+        <div class="row d-none" id="no-contacts">
+            <div class="col-12 text-center py-5">
+                <i class="fas fa-address-book fa-4x text-muted mb-3"></i>
+                <h4 class="text-muted">No hay contactos aún</h4>
+                <p class="text-muted">Los contactos aparecerán aquí cuando recibas o envíes mensajes</p>
+                <a href="/" class="btn btn-success">
+                    <i class="fas fa-paper-plane me-2"></i>Enviar primer mensaje
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let allContacts = [];
+        let filteredContacts = [];
+        let currentFilter = null;
+
+        // Cargar contactos al iniciar
+        document.addEventListener('DOMContentLoaded', loadContacts);
+
+        // Búsqueda en tiempo real
+        document.getElementById('search-input').addEventListener('input', filterContacts);
+
+        async function loadContacts(days = null) {
+            try {
+                // Actualizar botones activos
+                document.querySelectorAll('.btn-group .btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                
+                if (days === null) {
+                    document.getElementById('btn-all').classList.add('active');
+                } else if (days === 30) {
+                    document.getElementById('btn-30').classList.add('active');
+                } else if (days === 7) {
+                    document.getElementById('btn-7').classList.add('active');
+                } else if (days === 1) {
+                    document.getElementById('btn-1').classList.add('active');
+                }
+                
+                currentFilter = days;
+                const url = days ? `/api/contacts?days=${days}` : '/api/contacts';
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (data.success) {
+                    allContacts = data.contacts;
+                    filteredContacts = [...allContacts];
+                    displayContacts();
+                    updateStats(data);
+                    updateFilterInfo(data);
+                } else {
+                    showError('Error cargando contactos: ' + data.error);
+                }
+            } catch (error) {
+                showError('Error de conexión: ' + error.message);
+            }
+        }
+
+        function displayContacts() {
+            const container = document.getElementById('contacts-container');
+            const noContactsDiv = document.getElementById('no-contacts');
+            
+            if (filteredContacts.length === 0) {
+                container.innerHTML = '';
+                noContactsDiv.classList.remove('d-none');
+                return;
+            }
+            
+            noContactsDiv.classList.add('d-none');
+            
+            const contactsHTML = filteredContacts.map(contact => {
+                const initials = getInitials(contact.name);
+                const lastMessageDate = formatDate(contact.lastMessage);
+                const firstContactDate = formatDate(contact.firstContact);
+                
+                return `
+                    <div class="col-md-6 col-lg-4 mb-3">
+                        <div class="card contact-card h-100" onclick="copyNumber('${contact.number}')">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center">
+                                    <div class="contact-avatar me-3">
+                                        ${initials}
+                                    </div>
+                                    <div class="contact-info">
+                                        <h6 class="mb-1">${contact.name}</h6>
+                                        <div class="contact-number">+${contact.number}</div>
+                                        <div class="contact-date">
+                                            <i class="fas fa-clock me-1"></i>
+                                            Último: ${lastMessageDate}
+                                        </div>
+                                        <div class="contact-date">
+                                            <i class="fas fa-calendar me-1"></i>
+                                            Primer contacto: ${firstContactDate}
+                                        </div>
+                                    </div>
+                                    <div class="text-success">
+                                        <i class="fas fa-copy"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            
+            container.innerHTML = contactsHTML;
+        }
+
+        function filterContacts() {
+            const searchTerm = document.getElementById('search-input').value.toLowerCase();
+            
+            filteredContacts = allContacts.filter(contact => 
+                contact.name.toLowerCase().includes(searchTerm) ||
+                contact.number.includes(searchTerm)
+            );
+            
+            displayContacts();
+        }
+
+        function updateStats(data = null) {
+             if (data) {
+                 // Mostrar estadísticas basadas en el filtro actual
+                 document.getElementById('total-contacts').textContent = data.total || 0;
+                 document.getElementById('filtered-contacts').textContent = data.filtered || 0;
+                 
+                 // Actualizar títulos según el filtro
+                 if (data.days) {
+                     document.getElementById('stat1-title').textContent = 'Total Histórico';
+                     document.getElementById('stat2-title').textContent = `Últimos ${data.days} días`;
+                     document.getElementById('stat3-title').textContent = 'Mostrando';
+                     document.getElementById('recent-contacts').textContent = data.filtered || 0;
+                     
+                     // Cambiar iconos según el filtro
+                     document.getElementById('stat2-icon').className = data.days === 30 ? 'fas fa-calendar-day fa-2x mb-2' : 
+                                                                      data.days === 7 ? 'fas fa-calendar-week fa-2x mb-2' : 
+                                                                      'fas fa-calendar-alt fa-2x mb-2';
+                 } else {
+                     document.getElementById('stat1-title').textContent = 'Total Contactos';
+                     document.getElementById('stat2-title').textContent = 'Mostrando';
+                     document.getElementById('stat3-title').textContent = 'Últimos 7 días';
+                     
+                     // Calcular últimos 7 días para vista completa
+                     const weekAgo = new Date();
+                     weekAgo.setDate(weekAgo.getDate() - 7);
+                     const recentCount = allContacts.filter(contact => 
+                         new Date(contact.lastMessage) >= weekAgo
+                     ).length;
+                     
+                     document.getElementById('recent-contacts').textContent = recentCount;
+                     document.getElementById('stat2-icon').className = 'fas fa-eye fa-2x mb-2';
+                 }
+             } else {
+                 // Valores por defecto
+                 document.getElementById('total-contacts').textContent = allContacts.length;
+                 document.getElementById('filtered-contacts').textContent = allContacts.length;
+                 document.getElementById('recent-contacts').textContent = 0;
+             }
+         }
+
+          function updateFilterInfo(data) {
+              const filterInfo = document.getElementById('filter-info');
+              const filterText = document.getElementById('filter-text');
+              
+              if (data.days) {
+                  filterInfo.classList.remove('d-none');
+                  let periodText = '';
+                  if (data.days === 1) {
+                      periodText = 'hoy';
+                  } else if (data.days === 7) {
+                      periodText = 'los últimos 7 días';
+                  } else if (data.days === 30) {
+                      periodText = 'los últimos 30 días';
+                  } else {
+                      periodText = `los últimos ${data.days} días`;
+                  }
+                  
+                  filterText.textContent = `Mostrando ${data.filtered} contactos de ${periodText} (de un total de ${data.total} contactos)`;
+              } else {
+                  filterInfo.classList.add('d-none');
+              }
+          }
+
+          function getInitials(name) {
+            if (!name || name === 'Sin nombre') return '?';
+            return name.split(' ').map(word => word[0]).join('').toUpperCase().substring(0, 2);
+        }
+
+        function formatDate(dateString) {
+            const date = new Date(dateString);
+            const now = new Date();
+            const diffTime = Math.abs(now - date);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            
+            if (diffDays === 1) {
+                return 'Hoy';
+            } else if (diffDays === 2) {
+                return 'Ayer';
+            } else if (diffDays <= 7) {
+                return `Hace ${diffDays - 1} días`;
+            } else {
+                return date.toLocaleDateString('es-ES');
+            }
+        }
+
+        function copyNumber(number) {
+            navigator.clipboard.writeText(number).then(() => {
+                showAlert('Número copiado: +' + number, 'success');
+            }).catch(() => {
+                showAlert('No se pudo copiar el número', 'warning');
+            });
+        }
+
+        function showAlert(message, type) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed`;
+            alertDiv.style.cssText = 'top: 20px; right: 20px; z-index: 9999; min-width: 300px;';
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            
+            document.body.appendChild(alertDiv);
+            
+            setTimeout(() => {
+                if (alertDiv.parentNode) {
+                    alertDiv.parentNode.removeChild(alertDiv);
+                }
+            }, 5000);
+        }
+
+        function showError(message) {
+            const container = document.getElementById('contacts-container');
+            container.innerHTML = `
+                <div class="col-12 text-center py-5">
+                    <i class="fas fa-exclamation-triangle fa-4x text-warning mb-3"></i>
+                    <h4 class="text-muted">Error cargando contactos</h4>
+                    <p class="text-muted">${message}</p>
+                    <button class="btn btn-success" onclick="loadContacts()">
+                        <i class="fas fa-refresh me-2"></i>Reintentar
+                    </button>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>
