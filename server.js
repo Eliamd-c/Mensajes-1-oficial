@@ -208,6 +208,11 @@ async function initializeWhatsApp() {
                     initializationTimeout = null;
                 }
 
+                // Cargar historial de conversaciones al conectar
+                loadConversationHistory(sock).catch(err => {
+                    console.error('Error cargando historial:', err.message);
+                });
+
                 console.log('Notificando a clientes que WhatsApp está listo...');
                 io.emit('ready');
                 io.emit('authenticated');
@@ -290,6 +295,60 @@ async function initializeWhatsApp() {
             console.log('Reintentando inicialización...');
             initializeWhatsApp();
         }, 15000);
+    }
+}
+
+// Función para cargar historial de conversaciones
+async function loadConversationHistory(sock) {
+    try {
+        console.log('Cargando historial de conversaciones...');
+
+        // Obtener todos los chats
+        const allChats = sock.store?.chats?.all() || [];
+        let processedContacts = 0;
+
+        for (const chat of allChats) {
+            try {
+                // Saltar grupos
+                if (chat.id.includes('@g.us')) continue;
+
+                const number = chat.id.replace('@s.whatsapp.net', '');
+
+                // Obtener mensajes del chat
+                const messages = sock.store?.messages?.[chat.id]?.all() || [];
+
+                if (messages.length > 0) {
+                    // Obtener los últimos 10 mensajes entrantes
+                    const incomingMessages = messages
+                        .filter(msg => !msg.key.fromMe && msg.message)
+                        .slice(-10);
+
+                    if (incomingMessages.length > 0) {
+                        // Extraer texto de todos los mensajes
+                        const texts = incomingMessages
+                            .map(msg => {
+                                return msg.message?.conversation ||
+                                       msg.message?.extendedTextMessage?.text ||
+                                       '';
+                            })
+                            .filter(text => text.length > 0)
+                            .join(' ');
+
+                        if (texts.length > 5) {
+                            // Guardar en conversations.json
+                            saveConversation(number, texts);
+                            processedContacts++;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`Error procesando chat ${chat.id}:`, error.message);
+            }
+        }
+
+        console.log(`Historial cargado: ${processedContacts} contactos con conversaciones`);
+    } catch (error) {
+        console.error('Error cargando conversaciones:', error);
     }
 }
 
@@ -826,6 +885,31 @@ app.post('/api/config/openai-key-remove', (req, res) => {
     }
 });
 
+// Endpoint para cargar historial de conversaciones
+app.post('/api/crm/load-history', async (req, res) => {
+    if (!isClientReady || !sock) {
+        return res.status(400).json({
+            success: false,
+            error: 'WhatsApp no está conectado'
+        });
+    }
+
+    try {
+        await loadConversationHistory(sock);
+
+        res.json({
+            success: true,
+            message: 'Historial cargado correctamente'
+        });
+    } catch (error) {
+        console.error('Error cargando historial:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error cargando historial: ' + error.message
+        });
+    }
+});
+
 // Endpoint para escanear y etiquetar todos los contactos
 app.post('/api/crm/scan-messages', async (req, res) => {
     if (!process.env.OPENAI_API_KEY) {
@@ -847,8 +931,13 @@ app.post('/api/crm/scan-messages', async (req, res) => {
 
         for (const contact of contacts) {
             try {
-                // Obtener el texto del mensaje o las notas del contacto
-                const messageText = contact.messageText || contact.notes || '';
+                // Obtener el texto del mensaje, conversación histórica, o notas
+                let messageText = contact.messageText || contact.notes || '';
+
+                // Si no hay mensaje o notas, intentar obtener conversación histórica
+                if (!messageText) {
+                    messageText = getConversation(contact.number) || '';
+                }
 
                 if (messageText && messageText.length > 5) {
                     // Llamar a OpenAI para etiquetar
@@ -1370,6 +1459,39 @@ app.post('/api/crm/contact/:number/notes', (req, res) => {
         });
     }
 });
+
+function saveConversation(number, text) {
+    try {
+        const conversationsFile = path.join('logs', 'conversations.json');
+        let conversations = {};
+
+        if (fs.existsSync(conversationsFile)) {
+            const data = fs.readFileSync(conversationsFile, 'utf8');
+            conversations = JSON.parse(data);
+        }
+
+        conversations[number] = text;
+        fs.writeFileSync(conversationsFile, JSON.stringify(conversations, null, 2));
+    } catch (error) {
+        console.error('Error guardando conversación:', error);
+    }
+}
+
+function getConversation(number) {
+    try {
+        const conversationsFile = path.join('logs', 'conversations.json');
+        if (!fs.existsSync(conversationsFile)) {
+            return null;
+        }
+
+        const data = fs.readFileSync(conversationsFile, 'utf8');
+        const conversations = JSON.parse(data);
+        return conversations[number] || null;
+    } catch (error) {
+        console.error('Error obteniendo conversación:', error);
+        return null;
+    }
+}
 
 function getContacts() {
     try {

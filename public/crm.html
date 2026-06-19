@@ -142,12 +142,30 @@
         <!-- Acciones -->
         <div class="row mb-3">
             <div class="col-12">
-                <button class="btn btn-success" id="bulk-action-btn" style="display: none;">
+                <button class="btn btn-info" id="load-history-btn">
+                    <i class="fas fa-download me-2"></i>Cargar historial de WhatsApp
+                </button>
+                <button class="btn btn-success ms-2" id="bulk-action-btn" style="display: none;">
                     <i class="fas fa-envelope me-2"></i>Enviar mensaje masivo a filtrados
                 </button>
                 <button class="btn btn-warning ms-2" id="scan-btn">
                     <i class="fas fa-magic me-2"></i>Escanear y etiquetar todos los contactos
                 </button>
+            </div>
+        </div>
+
+        <!-- Progreso de Carga de Historial -->
+        <div class="row mb-3" id="load-history-progress-container" style="display: none;">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body">
+                        <h6>Cargando historial de WhatsApp...</h6>
+                        <div class="progress mb-2">
+                            <div class="progress-bar progress-bar-animated bg-info" style="width: 100%"></div>
+                        </div>
+                        <p class="mb-0"><small class="text-muted">Por favor espera, esto puede tomar unos minutos...</small></p>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -607,6 +625,41 @@
             setTimeout(() => {
                 alert('Copia los contactos desde CRM. Ahora ve a Enviar Mensajes y pega los números.');
             }, 500);
+        });
+
+        // Manejador para cargar historial
+        document.getElementById('load-history-btn').addEventListener('click', async () => {
+            if (!confirm('¿Cargar historial de WhatsApp? Esto puede tomar algunos minutos. Se extraerán los últimos mensajes de cada conversación.')) {
+                return;
+            }
+
+            const loadBtn = document.getElementById('load-history-btn');
+            loadBtn.disabled = true;
+            loadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Cargando...';
+
+            const progressContainer = document.getElementById('load-history-progress-container');
+            progressContainer.style.display = 'block';
+
+            try {
+                const response = await fetch('/api/crm/load-history', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('Historial cargado correctamente. Ahora puedes escanear los contactos.', 'success');
+                } else {
+                    showAlert('Error: ' + result.error, 'danger');
+                }
+            } catch (error) {
+                showAlert('Error cargando historial: ' + error.message, 'danger');
+            } finally {
+                loadBtn.disabled = false;
+                loadBtn.innerHTML = '<i class="fas fa-download me-2"></i>Cargar historial de WhatsApp';
+                progressContainer.style.display = 'none';
+            }
         });
 
         // Manejador para escaneo de mensajes
