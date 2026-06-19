@@ -233,6 +233,13 @@
                         <label class="form-label">Contacto: <strong id="modal-contact-name"></strong></label>
                         <div class="text-muted">+<span id="modal-contact-number"></span></div>
                     </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Notas/Contexto:</label>
+                        <textarea class="form-control" id="contact-notes" rows="3" placeholder="Ej: Compró el producto X, preguntó sobre el precio..."></textarea>
+                        <small class="text-muted">Estas notas se usan para etiquetar automáticamente con IA</small>
+                    </div>
+
                     <div class="mb-3">
                         <label class="form-label">Etiquetas Actuales:</label>
                         <div id="current-labels"></div>
@@ -250,6 +257,9 @@
                     </div>
                 </div>
                 <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" id="save-notes-btn" onclick="saveContactNotes()">
+                        <i class="fas fa-save me-2"></i>Guardar Notas
+                    </button>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
                 </div>
             </div>
@@ -434,9 +444,12 @@
             document.getElementById('modal-contact-name').textContent = name;
             document.getElementById('modal-contact-number').textContent = number;
 
-            // Cargar etiquetas actuales
+            // Cargar contacto y sus datos
             const contact = allContacts.find(c => c.number === number);
             const currentLabels = contact?.tags || [];
+
+            // Cargar notas
+            document.getElementById('contact-notes').value = contact?.notes || '';
 
             const labelsDiv = document.getElementById('current-labels');
             labelsDiv.innerHTML = currentLabels.length > 0 ?
@@ -501,6 +514,34 @@
                 }
             } catch (error) {
                 showAlert('Error eliminando etiqueta: ' + error.message, 'danger');
+            }
+        }
+
+        async function saveContactNotes() {
+            const notes = document.getElementById('contact-notes').value;
+            const saveBtn = document.getElementById('save-notes-btn');
+
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Guardando...';
+
+            try {
+                const response = await fetch(`/api/crm/contact/${editingNumber}/notes`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ notes })
+                });
+
+                if (response.ok) {
+                    loadContacts();
+                    showAlert('Notas guardadas correctamente', 'success');
+                } else {
+                    showAlert('Error guardando notas', 'danger');
+                }
+            } catch (error) {
+                showAlert('Error guardando notas: ' + error.message, 'danger');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fas fa-save me-2"></i>Guardar Notas';
             }
         }
 

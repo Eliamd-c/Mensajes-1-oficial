@@ -847,8 +847,8 @@ app.post('/api/crm/scan-messages', async (req, res) => {
 
         for (const contact of contacts) {
             try {
-                // Obtener el texto del mensaje del contacto
-                const messageText = contact.messageText || contact.lastMessage || '';
+                // Obtener el texto del mensaje o las notas del contacto
+                const messageText = contact.messageText || contact.notes || '';
 
                 if (messageText && messageText.length > 5) {
                     // Llamar a OpenAI para etiquetar
@@ -857,14 +857,14 @@ app.post('/api/crm/scan-messages', async (req, res) => {
                         messages: [
                             {
                                 role: 'system',
-                                content: `Eres un asistente que analiza mensajes de clientes y asigna etiquetas automáticas.
+                                content: `Eres un asistente que analiza información de clientes y asigna etiquetas automáticas.
 Las etiquetas disponibles son: "Interesado", "Compró", "Pregunta", "Problema", "Seguimiento", "Otro".
 Responde SOLO con una lista de etiquetas separadas por comas, sin explicación adicional.
 Si no hay una etiqueta clara, responde "Otro".`
                             },
                             {
                                 role: 'user',
-                                content: `Analiza este mensaje de cliente y asigna etiquetas: "${messageText}"`
+                                content: `Analiza esta información de cliente y asigna etiquetas: "${messageText}"`
                             }
                         ],
                         max_tokens: 50,
@@ -1317,12 +1317,14 @@ function saveContact(contactData) {
                 ...contacts[existingIndex],
                 name: contactData.name,
                 lastMessage: contactData.lastMessage,
-                isGroup: contactData.isGroup
+                isGroup: contactData.isGroup,
+                messageText: contactData.messageText || contacts[existingIndex].messageText || ''
             };
         } else {
             contacts.push({
                 ...contactData,
-                firstContact: contactData.firstContact || new Date().toISOString()
+                firstContact: contactData.firstContact || new Date().toISOString(),
+                notes: contactData.notes || ''
             });
         }
 
@@ -1331,6 +1333,43 @@ function saveContact(contactData) {
         console.error('Error guardando contacto:', error);
     }
 }
+
+// Endpoint para agregar notas a un contacto
+app.post('/api/crm/contact/:number/notes', (req, res) => {
+    try {
+        const { number } = req.params;
+        const { notes } = req.body;
+
+        const contactsFile = path.join('logs', 'contacts.json');
+        let contacts = [];
+
+        if (fs.existsSync(contactsFile)) {
+            const data = fs.readFileSync(contactsFile, 'utf8');
+            contacts = JSON.parse(data);
+        }
+
+        const contactIndex = contacts.findIndex(c => c.number === number);
+        if (contactIndex >= 0) {
+            contacts[contactIndex].notes = notes;
+            fs.writeFileSync(contactsFile, JSON.stringify(contacts, null, 2));
+
+            res.json({
+                success: true,
+                message: 'Notas guardadas'
+            });
+        } else {
+            res.status(404).json({
+                success: false,
+                error: 'Contacto no encontrado'
+            });
+        }
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Error guardando notas: ' + error.message
+        });
+    }
+});
 
 function getContacts() {
     try {
