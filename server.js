@@ -103,6 +103,14 @@ let sock = null;
 let isClientReady = false;
 let qrCodeData = null;
 
+// Inicializar el store de Baileys (captura chats, contactos y mensajes)
+const store = makeInMemoryStore({});
+const storeFile = path.join('logs', 'baileys_store.json');
+try { store.readFromFile(storeFile); } catch (e) { /* primera vez, no existe */ }
+setInterval(() => {
+    try { store.writeToFile(storeFile); } catch (e) { /* ignorar */ }
+}, 30000);
+
 // Variables de control
 let isInitializing = false;
 let qrRetryCount = 0;
@@ -160,10 +168,20 @@ async function initializeWhatsApp() {
             browser: ['Mensajes Masivos', 'Chrome', '10.0'],
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 30000,
+            keepAliveIntervalMs: 25000,
+            retryRequestDelayMs: 250,
             emitOwnEvents: true,
-            getMessage: async () => { return { conversation: '' }; }
+            syncFullHistory: true,
+            markOnlineOnConnect: false,
+            getMessage: async (key) => {
+                const jid = key.remoteJid;
+                const msg = store.messages?.[jid]?.get(key.id);
+                return msg?.message || { conversation: '' };
+            }
         });
+
+        // Vincular store al socket para capturar TODOS los eventos
+        store.bind(sock.ev);
 
         // Guardar credenciales cuando se actualicen
         sock.ev.on('creds.update', saveCreds);
@@ -208,13 +226,21 @@ async function initializeWhatsApp() {
                     initializationTimeout = null;
                 }
 
-                // No cargar historial automáticamente para evitar inestabilidad
-                // El usuario puede hacerlo manualmente desde el CRM
-
                 console.log('Notificando a clientes que WhatsApp está listo...');
                 io.emit('ready');
                 io.emit('authenticated');
                 io.emit('status', { ready: true, qrCode: null });
+
+                // Extraer contactos 30s después de conectar (da tiempo al historial sync)
+                setTimeout(async () => {
+                    if (isClientReady) {
+                        console.log('Extracción automática de contactos post-conexión...');
+                        await extractAllContactsFromWhatsApp();
+                        await loadConversationHistory();
+                        const contacts = getContacts();
+                        console.log(`Extracción automática completada: ${contacts.length} contactos`);
+                    }
+                }, 30000);
             }
 
             // Conexión cerrada
@@ -229,13 +255,16 @@ async function initializeWhatsApp() {
                 console.log(`Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
                 io.emit('disconnected');
 
+                // Guardar store antes de reconectar
+                try { store.writeToFile(storeFile); } catch (e) { /* ignorar */ }
+
                 if (shouldReconnect) {
-                    console.log('Reconectando en 5 segundos...');
-                    setTimeout(() => initializeWhatsApp(), 5000);
+                    const delay = statusCode === 408 || statusCode === 503 ? 10000 : 5000;
+                    console.log(`Reconectando en ${delay/1000} segundos...`);
+                    setTimeout(() => initializeWhatsApp(), delay);
                 } else {
                     console.log('Sesión cerrada. Limpiando credenciales...');
                     qrRetryCount = 0;
-                    // Limpiar auth para forzar nuevo QR
                     if (fs.existsSync('auth_info')) {
                         fs.rmSync('auth_info', { recursive: true, force: true });
                         fs.mkdirSync('auth_info', { recursive: true });
@@ -245,35 +274,98 @@ async function initializeWhatsApp() {
             }
         });
 
-        // Capturar mensajes entrantes para contactos
-        sock.ev.on('messages.upsert', async (m) => {
-            try {
-                if (m.type !== 'notify') return;
-                for (const msg of m.messages) {
-                    if (!msg.key.fromMe && msg.key.remoteJid?.endsWith('@s.whatsapp.net')) {
-                        const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
-                        const pushName = msg.pushName || 'Sin nombre';
-                        const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+        // Capturar chats durante sincronización de historial
+        sock.ev.on('chats.upsert', (chats) => {
+            let added = 0;
+            for (const chat of chats) {
+                try {
+                    if (!chat.id || chat.id.includes('@g.us')) continue;
+                    const number = chat.id.replace('@s.whatsapp.net', '');
+                    if (!number || number.length < 5) continue;
 
+                    const contactData = {
+                        number,
+                        name: chat.name || `Usuario ${number.substring(0, 5)}`,
+                        lastMessage: new Date().toISOString(),
+                        isGroup: false,
+                        messageText: ''
+                    };
+                    saveContact(contactData);
+                    added++;
+                } catch (e) { /* ignorar chat individual con error */ }
+            }
+            if (added > 0) console.log(`chats.upsert: ${added} contactos guardados de ${chats.length} chats`);
+        });
+
+        // Capturar nombres de contactos durante sincronización
+        sock.ev.on('contacts.upsert', (contacts) => {
+            let updated = 0;
+            for (const contact of contacts) {
+                try {
+                    if (!contact.id || contact.id.includes('@g.us')) continue;
+                    const number = contact.id.replace('@s.whatsapp.net', '');
+                    if (!number || number.length < 5) continue;
+
+                    const name = contact.notify || contact.verifiedName || contact.name || '';
+                    if (name) {
                         const contactData = {
                             number,
-                            name: pushName,
+                            name,
                             lastMessage: new Date().toISOString(),
                             isGroup: false,
-                            messageText: messageText
+                            messageText: ''
                         };
-
                         saveContact(contactData);
+                        updated++;
+                    }
+                } catch (e) { /* ignorar contacto individual con error */ }
+            }
+            if (updated > 0) console.log(`contacts.upsert: ${updated} nombres actualizados`);
+        });
 
-                        // Auto-etiquetar con IA si está habilitada
-                        if (process.env.OPENAI_API_KEY) {
-                            try {
-                                await autoLabelContact(number, messageText);
-                            } catch (labelError) {
-                                console.log('No se pudo auto-etiquetar contacto:', labelError.message);
-                            }
+        // Capturar mensajes: tanto nuevos (notify) como historial (append)
+        sock.ev.on('messages.upsert', async (m) => {
+            try {
+                const isHistorySync = m.type === 'append';
+
+                for (const msg of m.messages) {
+                    if (!msg.key.remoteJid?.endsWith('@s.whatsapp.net')) continue;
+                    if (msg.key.fromMe) continue;
+
+                    const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
+                    const pushName = msg.pushName || 'Sin nombre';
+                    const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+
+                    const timestamp = msg.messageTimestamp
+                        ? new Date(typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp * 1000 : Number(msg.messageTimestamp) * 1000).toISOString()
+                        : new Date().toISOString();
+
+                    const contactData = {
+                        number,
+                        name: pushName,
+                        lastMessage: timestamp,
+                        isGroup: false,
+                        messageText: messageText
+                    };
+
+                    saveContact(contactData);
+
+                    if (messageText && messageText.length > 3) {
+                        saveConversation(number, messageText);
+                    }
+
+                    // Auto-etiquetar solo mensajes nuevos en tiempo real (no historial)
+                    if (m.type === 'notify' && process.env.OPENAI_API_KEY && messageText) {
+                        try {
+                            await autoLabelContact(number, messageText);
+                        } catch (labelError) {
+                            console.log('No se pudo auto-etiquetar contacto:', labelError.message);
                         }
                     }
+                }
+
+                if (isHistorySync && m.messages.length > 0) {
+                    console.log(`Historial sincronizado: ${m.messages.length} mensajes procesados`);
                 }
             } catch (error) {
                 console.error('Error procesando mensaje entrante:', error);
@@ -296,205 +388,160 @@ async function initializeWhatsApp() {
     }
 }
 
-// Función para extraer TODOS los contactos de WhatsApp
-async function extractAllContactsFromWhatsApp(sock) {
+// Función para extraer TODOS los contactos de WhatsApp usando el store
+async function extractAllContactsFromWhatsApp() {
     try {
-        console.log('Extrayendo contactos de WhatsApp...');
-
-        if (!sock || !sock.store) {
-            console.warn('WhatsApp store no disponible');
-            return;
-        }
+        console.log('Extrayendo contactos del store de Baileys...');
 
         let allChats = [];
         try {
-            if (typeof sock.store.chats.all === 'function') {
-                allChats = sock.store.chats.all();
-            } else if (Array.isArray(sock.store.chats)) {
-                allChats = sock.store.chats;
-            } else if (sock.store.chats instanceof Map) {
-                allChats = Array.from(sock.store.chats.values());
+            if (store.chats) {
+                if (typeof store.chats.all === 'function') {
+                    allChats = store.chats.all();
+                } else if (store.chats instanceof Map) {
+                    allChats = Array.from(store.chats.values());
+                } else if (typeof store.chats.toJSON === 'function') {
+                    allChats = store.chats.toJSON();
+                } else if (Array.isArray(store.chats)) {
+                    allChats = store.chats;
+                }
             }
         } catch (error) {
-            console.warn('No se pudieron obtener los chats:', error.message);
-            return;
+            console.warn('No se pudieron obtener los chats del store:', error.message);
         }
 
-        const contactsFile = path.join('logs', 'contacts.json');
-        let existingContacts = [];
-
-        if (fs.existsSync(contactsFile)) {
-            const data = fs.readFileSync(contactsFile, 'utf8');
-            existingContacts = JSON.parse(data);
-        }
+        console.log(`Store contiene ${allChats.length} chats`);
 
         let newContactsAdded = 0;
 
         for (const chat of allChats) {
             try {
                 if (!chat || !chat.id) continue;
-
-                // Saltar grupos
                 if (chat.id.includes('@g.us')) continue;
 
                 const number = chat.id.replace('@s.whatsapp.net', '');
                 if (!number || number.length < 5) continue;
 
-                // Verificar si el contacto ya existe
-                const exists = existingContacts.some(c => c.number === number);
-                if (!exists) {
-                    // Obtener nombre del chat
-                    const name = chat.name || `Usuario ${number.substring(0, 5)}`;
+                let lastMessage = new Date().toISOString();
+                let messageText = '';
 
-                    // Intentar obtener último mensaje
-                    let lastMessage = new Date().toISOString();
-                    let messageText = '';
-
-                    try {
-                        if (sock.store.messages && sock.store.messages[chat.id]) {
-                            const msgStore = sock.store.messages[chat.id];
-                            let messages = [];
-
-                            if (typeof msgStore.all === 'function') {
-                                messages = msgStore.all();
-                            } else if (Array.isArray(msgStore)) {
-                                messages = msgStore;
-                            } else if (msgStore instanceof Map) {
-                                messages = Array.from(msgStore.values());
-                            }
-
-                            if (messages.length > 0) {
-                                const lastMsg = messages[messages.length - 1];
-                                if (lastMsg && lastMsg.messageTimestamp) {
-                                    lastMessage = new Date(lastMsg.messageTimestamp * 1000).toISOString();
-                                }
-
-                                // Extraer texto del último mensaje
-                                if (lastMsg && lastMsg.message) {
-                                    messageText = lastMsg.message?.conversation ||
-                                                 lastMsg.message?.extendedTextMessage?.text ||
-                                                 '';
-                                }
-                            }
+                try {
+                    const msgStore = store.messages?.[chat.id];
+                    if (msgStore) {
+                        let messages = [];
+                        if (typeof msgStore.all === 'function') {
+                            messages = msgStore.all();
+                        } else if (msgStore instanceof Map) {
+                            messages = Array.from(msgStore.values());
+                        } else if (typeof msgStore.toJSON === 'function') {
+                            messages = msgStore.toJSON();
                         }
-                    } catch (error) {
-                        console.log(`No hay mensajes para ${number}`);
+
+                        if (messages.length > 0) {
+                            const lastMsg = messages[messages.length - 1];
+                            if (lastMsg?.messageTimestamp) {
+                                const ts = typeof lastMsg.messageTimestamp === 'number'
+                                    ? lastMsg.messageTimestamp : Number(lastMsg.messageTimestamp);
+                                lastMessage = new Date(ts * 1000).toISOString();
+                            }
+                            messageText = lastMsg?.message?.conversation ||
+                                         lastMsg?.message?.extendedTextMessage?.text || '';
+                        }
                     }
+                } catch (e) { /* no hay mensajes */ }
 
-                    const newContact = {
-                        number,
-                        name,
-                        lastMessage,
-                        firstContact: lastMessage,
-                        isGroup: false,
-                        messageText,
-                        notes: ''
-                    };
+                const name = chat.name || store.contacts?.[chat.id]?.notify || `Usuario ${number.substring(0, 5)}`;
 
-                    existingContacts.push(newContact);
-                    newContactsAdded++;
-                }
+                const contactData = {
+                    number,
+                    name,
+                    lastMessage,
+                    firstContact: lastMessage,
+                    isGroup: false,
+                    messageText,
+                    notes: ''
+                };
+
+                saveContact(contactData);
+                newContactsAdded++;
             } catch (error) {
                 console.error('Error procesando chat:', error.message);
             }
         }
 
-        // Guardar contactos actualizados
-        if (newContactsAdded > 0) {
-            fs.writeFileSync(contactsFile, JSON.stringify(existingContacts, null, 2));
-            console.log(`${newContactsAdded} nuevos contactos agregados. Total: ${existingContacts.length}`);
-        } else {
-            console.log(`No hay nuevos contactos. Total existentes: ${existingContacts.length}`);
-        }
+        console.log(`Extracción completada: ${newContactsAdded} contactos procesados de ${allChats.length} chats`);
     } catch (error) {
         console.error('Error extrayendo contactos:', error);
     }
 }
 
-// Función para cargar historial de conversaciones
-async function loadConversationHistory(sock) {
+// Función para cargar historial de conversaciones desde el store
+async function loadConversationHistory() {
     try {
-        console.log('Cargando historial de conversaciones...');
+        console.log('Cargando historial de conversaciones desde store...');
 
-        if (!sock || !sock.store) {
-            console.warn('WhatsApp store no disponible');
-            return;
-        }
-
-        // Obtener todos los chats
         let allChats = [];
         try {
-            if (typeof sock.store.chats.all === 'function') {
-                allChats = sock.store.chats.all();
-            } else if (Array.isArray(sock.store.chats)) {
-                allChats = sock.store.chats;
-            } else if (sock.store.chats instanceof Map) {
-                allChats = Array.from(sock.store.chats.values());
+            if (store.chats) {
+                if (typeof store.chats.all === 'function') {
+                    allChats = store.chats.all();
+                } else if (store.chats instanceof Map) {
+                    allChats = Array.from(store.chats.values());
+                } else if (typeof store.chats.toJSON === 'function') {
+                    allChats = store.chats.toJSON();
+                } else if (Array.isArray(store.chats)) {
+                    allChats = store.chats;
+                }
             }
         } catch (error) {
-            console.warn('No se pudieron obtener los chats:', error.message);
+            console.warn('No se pudieron obtener los chats del store:', error.message);
             return;
         }
 
+        console.log(`Procesando historial de ${allChats.length} chats...`);
         let processedContacts = 0;
 
         for (const chat of allChats) {
             try {
                 if (!chat || !chat.id) continue;
-
-                // Saltar grupos
                 if (chat.id.includes('@g.us')) continue;
 
                 const number = chat.id.replace('@s.whatsapp.net', '');
                 if (!number || number.length < 5) continue;
 
-                // Obtener mensajes del chat
                 let messages = [];
                 try {
-                    if (sock.store.messages && sock.store.messages[chat.id]) {
-                        const msgStore = sock.store.messages[chat.id];
+                    const msgStore = store.messages?.[chat.id];
+                    if (msgStore) {
                         if (typeof msgStore.all === 'function') {
                             messages = msgStore.all();
-                        } else if (Array.isArray(msgStore)) {
-                            messages = msgStore;
                         } else if (msgStore instanceof Map) {
                             messages = Array.from(msgStore.values());
+                        } else if (typeof msgStore.toJSON === 'function') {
+                            messages = msgStore.toJSON();
                         }
                     }
-                } catch (error) {
-                    console.log(`No hay mensajes para ${number}`);
-                }
+                } catch (e) { /* no hay mensajes */ }
 
                 if (messages.length > 0) {
-                    // Obtener los últimos 10 mensajes entrantes
                     const incomingMessages = messages
-                        .filter(msg => msg && msg.key && !msg.key.fromMe && msg.message)
+                        .filter(msg => msg?.key && !msg.key.fromMe && msg.message)
                         .slice(-10);
 
                     if (incomingMessages.length > 0) {
-                        // Extraer texto de todos los mensajes
                         const texts = incomingMessages
-                            .map(msg => {
-                                try {
-                                    return msg.message?.conversation ||
-                                           msg.message?.extendedTextMessage?.text ||
-                                           '';
-                                } catch (e) {
-                                    return '';
-                                }
-                            })
-                            .filter(text => text && text.length > 0)
-                            .join(' ');
+                            .map(msg => msg.message?.conversation || msg.message?.extendedTextMessage?.text || '')
+                            .filter(text => text.length > 0)
+                            .join(' | ');
 
                         if (texts.length > 5) {
-                            // Guardar en conversations.json
                             saveConversation(number, texts);
                             processedContacts++;
                         }
                     }
                 }
             } catch (error) {
-                console.error(`Error procesando chat:`, error.message);
+                console.error('Error procesando chat:', error.message);
             }
         }
 
@@ -1047,12 +1094,13 @@ app.post('/api/crm/load-history', async (req, res) => {
     }
 
     try {
-        await loadConversationHistory(sock);
-        await extractAllContactsFromWhatsApp(sock);
+        await extractAllContactsFromWhatsApp();
+        await loadConversationHistory();
 
+        const contacts = getContacts();
         res.json({
             success: true,
-            message: 'Historial y contactos cargados correctamente'
+            message: `Historial cargado: ${contacts.length} contactos encontrados`
         });
     } catch (error) {
         console.error('Error cargando historial:', error);
@@ -1489,6 +1537,15 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Servidor ejecutándose en http://localhost:${PORT}`);
 });
+
+// Guardar store al cerrar el proceso (Hostinger redeploy)
+const gracefulShutdown = () => {
+    console.log('Cerrando servidor, guardando store...');
+    try { store.writeToFile(storeFile); } catch (e) { /* ignorar */ }
+    process.exit(0);
+};
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 // Funciones de logging y seguimiento
 function saveCampaign(campaignData) {
