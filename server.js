@@ -296,6 +296,121 @@ async function initializeWhatsApp() {
     }
 }
 
+// Función para extraer TODOS los contactos de WhatsApp
+async function extractAllContactsFromWhatsApp(sock) {
+    try {
+        console.log('Extrayendo contactos de WhatsApp...');
+
+        if (!sock || !sock.store) {
+            console.warn('WhatsApp store no disponible');
+            return;
+        }
+
+        let allChats = [];
+        try {
+            if (typeof sock.store.chats.all === 'function') {
+                allChats = sock.store.chats.all();
+            } else if (Array.isArray(sock.store.chats)) {
+                allChats = sock.store.chats;
+            } else if (sock.store.chats instanceof Map) {
+                allChats = Array.from(sock.store.chats.values());
+            }
+        } catch (error) {
+            console.warn('No se pudieron obtener los chats:', error.message);
+            return;
+        }
+
+        const contactsFile = path.join('logs', 'contacts.json');
+        let existingContacts = [];
+
+        if (fs.existsSync(contactsFile)) {
+            const data = fs.readFileSync(contactsFile, 'utf8');
+            existingContacts = JSON.parse(data);
+        }
+
+        let newContactsAdded = 0;
+
+        for (const chat of allChats) {
+            try {
+                if (!chat || !chat.id) continue;
+
+                // Saltar grupos
+                if (chat.id.includes('@g.us')) continue;
+
+                const number = chat.id.replace('@s.whatsapp.net', '');
+                if (!number || number.length < 5) continue;
+
+                // Verificar si el contacto ya existe
+                const exists = existingContacts.some(c => c.number === number);
+                if (!exists) {
+                    // Obtener nombre del chat
+                    const name = chat.name || `Usuario ${number.substring(0, 5)}`;
+
+                    // Intentar obtener último mensaje
+                    let lastMessage = new Date().toISOString();
+                    let messageText = '';
+
+                    try {
+                        if (sock.store.messages && sock.store.messages[chat.id]) {
+                            const msgStore = sock.store.messages[chat.id];
+                            let messages = [];
+
+                            if (typeof msgStore.all === 'function') {
+                                messages = msgStore.all();
+                            } else if (Array.isArray(msgStore)) {
+                                messages = msgStore;
+                            } else if (msgStore instanceof Map) {
+                                messages = Array.from(msgStore.values());
+                            }
+
+                            if (messages.length > 0) {
+                                const lastMsg = messages[messages.length - 1];
+                                if (lastMsg && lastMsg.messageTimestamp) {
+                                    lastMessage = new Date(lastMsg.messageTimestamp * 1000).toISOString();
+                                }
+
+                                // Extraer texto del último mensaje
+                                if (lastMsg && lastMsg.message) {
+                                    messageText = lastMsg.message?.conversation ||
+                                                 lastMsg.message?.extendedTextMessage?.text ||
+                                                 '';
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        console.log(`No hay mensajes para ${number}`);
+                    }
+
+                    const newContact = {
+                        number,
+                        name,
+                        lastMessage,
+                        firstContact: lastMessage,
+                        isGroup: false,
+                        messageText,
+                        notes: ''
+                    };
+
+                    existingContacts.push(newContact);
+                    newContactsAdded++;
+                }
+            } catch (error) {
+                console.error('Error procesando chat:', error.message);
+            }
+        }
+
+        // Guardar contactos actualizados
+        if (newContactsAdded > 0) {
+            fs.writeFileSync(contactsFile, JSON.stringify(existingContacts, null, 2));
+            console.log(`${newContactsAdded} nuevos contactos agregados. Total: ${existingContacts.length}`);
+        } else {
+            console.log(`No hay nuevos contactos. Total existentes: ${existingContacts.length}`);
+        }
+    } catch (error) {
+        console.error('Error extrayendo contactos:', error);
+    }
+}
+
 // Función para cargar historial de conversaciones
 async function loadConversationHistory(sock) {
     try {
@@ -933,10 +1048,11 @@ app.post('/api/crm/load-history', async (req, res) => {
 
     try {
         await loadConversationHistory(sock);
+        await extractAllContactsFromWhatsApp(sock);
 
         res.json({
             success: true,
-            message: 'Historial cargado correctamente'
+            message: 'Historial y contactos cargados correctamente'
         });
     } catch (error) {
         console.error('Error cargando historial:', error);
