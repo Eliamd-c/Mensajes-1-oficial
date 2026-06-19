@@ -124,6 +124,63 @@ const numberToJid = (number) => {
     return clean.includes('@s.whatsapp.net') ? clean : `${clean}@s.whatsapp.net`;
 };
 
+// ====== Manejo de LID (identificador de privacidad de WhatsApp) ======
+// WhatsApp usa @lid para ocultar el número real. El número real (@s.whatsapp.net)
+// solo aparece en mensajes vía key.senderPn. Mantenemos un mapa LID->número.
+const isPnJid = (jid) => typeof jid === 'string' && jid.endsWith('@s.whatsapp.net');
+const isLidJid = (jid) => typeof jid === 'string' && jid.endsWith('@lid');
+const isJidGroupSafe = (jid) => typeof jid === 'string' && (jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter'));
+const digitsOf = (jid) => {
+    if (!jid || typeof jid !== 'string') return null;
+    const d = jid.split('@')[0].split(':')[0].split('_')[0];
+    return /^\d+$/.test(d) ? d : null;
+};
+
+let lidMapCache = null;
+function getLidMap() {
+    if (lidMapCache) return lidMapCache;
+    try {
+        const f = path.join('logs', 'lid_map.json');
+        lidMapCache = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : {};
+    } catch (e) {
+        lidMapCache = {};
+    }
+    return lidMapCache;
+}
+function saveLidMap() {
+    try {
+        fs.writeFileSync(path.join('logs', 'lid_map.json'), JSON.stringify(lidMapCache || {}, null, 2));
+    } catch (e) { /* ignorar */ }
+}
+let lidMapDirty = false;
+function recordLidMapping(lid, pn) {
+    if (!lid || !pn) return;
+    const map = getLidMap();
+    if (map[lid] !== pn) {
+        map[lid] = pn;
+        lidMapDirty = true;
+    }
+}
+
+// Dado un jid de número (pn) y/o un jid lid, devuelve la identidad resuelta.
+// Si solo tenemos lid pero existe mapeo, usa el número real.
+function buildIdentity(pnJid, lidJid) {
+    const map = getLidMap();
+    let pn = isPnJid(pnJid) ? digitsOf(pnJid) : null;
+    const lid = isLidJid(lidJid) ? digitsOf(lidJid) : null;
+
+    if (pn && lid) recordLidMapping(lid, pn);
+    if (!pn && lid && map[lid]) pn = map[lid];
+
+    if (pn && pn.length >= 7) {
+        return { number: pn, jid: `${pn}@s.whatsapp.net`, lid: lid || undefined, numberType: 'real' };
+    }
+    if (lid && lid.length >= 5) {
+        return { number: lid, jid: `${lid}@lid`, lid, numberType: 'lid' };
+    }
+    return null;
+}
+
 // Inicializar cliente de WhatsApp con Baileys
 async function initializeWhatsApp() {
     if (isInitializing) {
@@ -256,160 +313,145 @@ async function initializeWhatsApp() {
             }
         });
 
+        // Identidad a partir de una clave de mensaje (usa senderPn = número real)
+        const identityFromKey = (key) => {
+            if (!key) return null;
+            const pnJid = isPnJid(key.senderPn) ? key.senderPn
+                        : isPnJid(key.remoteJid) ? key.remoteJid
+                        : isPnJid(key.participantPn) ? key.participantPn : null;
+            const lidJid = isLidJid(key.senderLid) ? key.senderLid
+                        : isLidJid(key.remoteJid) ? key.remoteJid
+                        : isLidJid(key.participantLid) ? key.participantLid : null;
+            return buildIdentity(pnJid, lidJid);
+        };
+
+        const textOf = (msg) => msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+        const tsOf = (msg) => msg.messageTimestamp
+            ? new Date((typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp : Number(msg.messageTimestamp)) * 1000).toISOString()
+            : new Date().toISOString();
+
         // Evento principal de sincronización de historial en Baileys v6
         sock.ev.on('messaging-history.set', ({ chats, contacts, messages, progress }) => {
             console.log(`Historia sincronizada: ${chats.length} chats, ${contacts.length} contactos, ${messages.length} mensajes (progreso: ${progress || '?'}%)`);
+            const batch = [];
 
-            for (const chat of chats) {
-                try {
-                    if (!chat.id || chat.id.includes('@g.us')) continue;
-                    const number = chat.id.replace('@s.whatsapp.net', '');
-                    if (!number || number.length < 5) continue;
-
-                    const contactData = {
-                        number,
-                        name: chat.name || `Usuario ${number.substring(0, 5)}`,
-                        lastMessage: new Date().toISOString(),
-                        isGroup: false,
-                        messageText: ''
-                    };
-                    saveContact(contactData);
-                } catch (e) { /* ignorar */ }
-            }
-
-            for (const contact of contacts) {
+            // 1) Primero los contactos: traen lid + jid (mejor fuente para el mapa LID->número)
+            for (const contact of contacts || []) {
                 try {
                     if (!contact.id || contact.id.includes('@g.us')) continue;
-                    const number = contact.id.replace('@s.whatsapp.net', '');
-                    if (!number || number.length < 5) continue;
+                    const pnJid = isPnJid(contact.jid) ? contact.jid : isPnJid(contact.id) ? contact.id : null;
+                    const lidJid = isLidJid(contact.lid) ? contact.lid : isLidJid(contact.id) ? contact.id : null;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
                     const name = contact.notify || contact.verifiedName || contact.name || '';
-                    if (name) {
-                        saveContact({ number, name, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
-                    }
+                    batch.push({ ...id, name: name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
                 } catch (e) { /* ignorar */ }
             }
 
-            for (const msg of messages) {
+            // 2) Chats
+            for (const chat of chats || []) {
                 try {
-                    if (!msg.key?.remoteJid?.endsWith('@s.whatsapp.net')) continue;
-                    if (msg.key.fromMe) continue;
-                    const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
-                    const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-
-                    const timestamp = msg.messageTimestamp
-                        ? new Date((typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp : Number(msg.messageTimestamp)) * 1000).toISOString()
-                        : new Date().toISOString();
-
-                    saveContact({
-                        number,
-                        name: msg.pushName || `Usuario ${number.substring(0, 5)}`,
-                        lastMessage: timestamp,
-                        isGroup: false,
-                        messageText
-                    });
-
-                    if (messageText && messageText.length > 3) {
-                        saveConversation(number, messageText);
-                    }
+                    if (!chat.id || chat.id.includes('@g.us')) continue;
+                    const pnJid = isPnJid(chat.id) ? chat.id : null;
+                    const lidJid = isLidJid(chat.lidJid) ? chat.lidJid : isLidJid(chat.id) ? chat.id : null;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
+                    batch.push({ ...id, name: chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
                 } catch (e) { /* ignorar */ }
             }
 
+            // 3) Mensajes del historial
+            for (const msg of messages || []) {
+                try {
+                    if (msg.key?.fromMe) continue;
+                    if (isJidGroupSafe(msg.key?.remoteJid)) continue;
+                    const id = identityFromKey(msg.key);
+                    if (!id) continue;
+                    const messageText = textOf(msg);
+                    batch.push({ ...id, name: msg.pushName || `Usuario ${id.number.substring(0, 5)}`, lastMessage: tsOf(msg), isGroup: false, messageText });
+                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText);
+                } catch (e) { /* ignorar */ }
+            }
+
+            saveContactsBatch(batch);
             const totalContacts = getContacts();
-            console.log(`Post-sync: ${totalContacts.length} contactos totales en archivo`);
+            console.log(`Post-sync: ${totalContacts.length} contactos totales (${totalContacts.filter(c => c.numberType === 'real').length} con número real)`);
             io.emit('contacts-updated', { total: totalContacts.length });
         });
 
         // Capturar chats durante sincronización de historial
         sock.ev.on('chats.upsert', (chats) => {
-            let added = 0;
+            const batch = [];
             for (const chat of chats) {
                 try {
                     if (!chat.id || chat.id.includes('@g.us')) continue;
-                    const number = chat.id.replace('@s.whatsapp.net', '');
-                    if (!number || number.length < 5) continue;
-
-                    const contactData = {
-                        number,
-                        name: chat.name || `Usuario ${number.substring(0, 5)}`,
-                        lastMessage: new Date().toISOString(),
-                        isGroup: false,
-                        messageText: ''
-                    };
-                    saveContact(contactData);
-                    added++;
-                } catch (e) { /* ignorar chat individual con error */ }
+                    const pnJid = isPnJid(chat.id) ? chat.id : null;
+                    const lidJid = isLidJid(chat.lidJid) ? chat.lidJid : isLidJid(chat.id) ? chat.id : null;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
+                    batch.push({ ...id, name: chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                } catch (e) { /* ignorar */ }
             }
-            if (added > 0) console.log(`chats.upsert: ${added} contactos guardados de ${chats.length} chats`);
+            if (batch.length > 0) {
+                saveContactsBatch(batch);
+                console.log(`chats.upsert: ${batch.length} contactos guardados`);
+            }
         });
 
-        // Capturar nombres de contactos durante sincronización
+        // Capturar nombres de contactos durante sincronización (lid + jid)
         sock.ev.on('contacts.upsert', (contacts) => {
-            let updated = 0;
+            const batch = [];
             for (const contact of contacts) {
                 try {
                     if (!contact.id || contact.id.includes('@g.us')) continue;
-                    const number = contact.id.replace('@s.whatsapp.net', '');
-                    if (!number || number.length < 5) continue;
-
+                    const pnJid = isPnJid(contact.jid) ? contact.jid : isPnJid(contact.id) ? contact.id : null;
+                    const lidJid = isLidJid(contact.lid) ? contact.lid : isLidJid(contact.id) ? contact.id : null;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
                     const name = contact.notify || contact.verifiedName || contact.name || '';
-                    if (name) {
-                        const contactData = {
-                            number,
-                            name,
-                            lastMessage: new Date().toISOString(),
-                            isGroup: false,
-                            messageText: ''
-                        };
-                        saveContact(contactData);
-                        updated++;
-                    }
-                } catch (e) { /* ignorar contacto individual con error */ }
+                    batch.push({ ...id, name: name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                } catch (e) { /* ignorar */ }
             }
-            if (updated > 0) console.log(`contacts.upsert: ${updated} nombres actualizados`);
+            if (batch.length > 0) {
+                saveContactsBatch(batch);
+                console.log(`contacts.upsert: ${batch.length} contactos actualizados`);
+            }
         });
 
-        // Capturar mensajes: tanto nuevos (notify) como historial (append)
+        // Capturar mensajes en tiempo real (notify) e historial (append)
         sock.ev.on('messages.upsert', async (m) => {
             try {
-                const isHistorySync = m.type === 'append';
+                const batch = [];
+                const toLabel = [];
 
                 for (const msg of m.messages) {
-                    if (!msg.key.remoteJid?.endsWith('@s.whatsapp.net')) continue;
-                    if (msg.key.fromMe) continue;
+                    if (msg.key?.fromMe) continue;
+                    if (isJidGroupSafe(msg.key?.remoteJid)) continue;
 
-                    const number = msg.key.remoteJid.replace('@s.whatsapp.net', '');
-                    const pushName = msg.pushName || 'Sin nombre';
-                    const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+                    const id = identityFromKey(msg.key);
+                    if (!id) continue;
 
-                    const timestamp = msg.messageTimestamp
-                        ? new Date(typeof msg.messageTimestamp === 'number' ? msg.messageTimestamp * 1000 : Number(msg.messageTimestamp) * 1000).toISOString()
-                        : new Date().toISOString();
+                    const messageText = textOf(msg);
+                    batch.push({ ...id, name: msg.pushName || `Usuario ${id.number.substring(0, 5)}`, lastMessage: tsOf(msg), isGroup: false, messageText });
 
-                    const contactData = {
-                        number,
-                        name: pushName,
-                        lastMessage: timestamp,
-                        isGroup: false,
-                        messageText: messageText
-                    };
+                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText);
 
-                    saveContact(contactData);
-
-                    if (messageText && messageText.length > 3) {
-                        saveConversation(number, messageText);
-                    }
-
-                    // Auto-etiquetar solo mensajes nuevos en tiempo real (no historial)
                     if (m.type === 'notify' && process.env.OPENAI_API_KEY && messageText) {
-                        try {
-                            await autoLabelContact(number, messageText);
-                        } catch (labelError) {
-                            console.log('No se pudo auto-etiquetar contacto:', labelError.message);
-                        }
+                        toLabel.push({ number: id.number, text: messageText });
                     }
                 }
 
-                if (isHistorySync && m.messages.length > 0) {
+                if (batch.length > 0) saveContactsBatch(batch);
+
+                for (const item of toLabel) {
+                    try {
+                        await autoLabelContact(item.number, item.text);
+                    } catch (labelError) {
+                        console.log('No se pudo auto-etiquetar contacto:', labelError.message);
+                    }
+                }
+
+                if (m.type === 'append' && m.messages.length > 0) {
                     console.log(`Historial sincronizado: ${m.messages.length} mensajes procesados`);
                 }
             } catch (error) {
@@ -1439,6 +1481,21 @@ io.on('connection', (socket) => {
     });
 });
 
+// Compactar y normalizar contactos existentes al arrancar (limpia sufijos @lid antiguos)
+function compactContactsFile() {
+    try {
+        const contactsFile = path.join('logs', 'contacts.json');
+        if (!fs.existsSync(contactsFile)) return;
+        const clean = getContacts(); // normaliza + deduplica
+        fs.writeFileSync(contactsFile, JSON.stringify(clean, null, 2));
+        const real = clean.filter(c => c.numberType === 'real').length;
+        console.log(`Contactos normalizados al arrancar: ${clean.length} (${real} con número real, ${clean.length - real} solo LID)`);
+    } catch (e) {
+        console.error('Error compactando contactos:', e.message);
+    }
+}
+compactContactsFile();
+
 // Inicializar WhatsApp al arrancar el servidor
 initializeWhatsApp();
 
@@ -1510,37 +1567,55 @@ function getFailedNumbers(campaignId) {
     }
 }
 
+const isRealName = (n) => n && !/^Usuario \d+/.test(n) && n !== 'Sin nombre';
+
+// Fusiona un contacto dentro de la lista en memoria (no escribe a disco)
+function applyContactUpsert(contacts, contactData) {
+    if (!contactData || !contactData.number) return;
+    const idx = contacts.findIndex(c => c.number === contactData.number);
+    if (idx >= 0) {
+        const ex = contacts[idx];
+        contacts[idx] = {
+            ...ex,
+            name: isRealName(contactData.name) ? contactData.name : (ex.name || contactData.name),
+            lastMessage: contactData.lastMessage && (!ex.lastMessage || new Date(contactData.lastMessage) > new Date(ex.lastMessage))
+                ? contactData.lastMessage : ex.lastMessage,
+            isGroup: contactData.isGroup ?? ex.isGroup,
+            messageText: contactData.messageText || ex.messageText || '',
+            lid: contactData.lid || ex.lid,
+            numberType: contactData.numberType === 'real' ? 'real' : (ex.numberType || contactData.numberType),
+            jid: contactData.jid || ex.jid
+        };
+    } else {
+        contacts.push({
+            ...contactData,
+            firstContact: contactData.firstContact || new Date().toISOString(),
+            notes: contactData.notes || ''
+        });
+    }
+}
+
+// Guarda un solo contacto (uso en tiempo real). Parte de la lista normalizada
+// para que cada escritura compacte y limpie datos antiguos.
 function saveContact(contactData) {
     try {
-        const contactsFile = path.join('logs', 'contacts.json');
-        let contacts = [];
-
-        if (fs.existsSync(contactsFile)) {
-            const data = fs.readFileSync(contactsFile, 'utf8');
-            contacts = JSON.parse(data);
-        }
-
-        const existingIndex = contacts.findIndex(c => c.number === contactData.number);
-
-        if (existingIndex >= 0) {
-            contacts[existingIndex] = {
-                ...contacts[existingIndex],
-                name: contactData.name,
-                lastMessage: contactData.lastMessage,
-                isGroup: contactData.isGroup,
-                messageText: contactData.messageText || contacts[existingIndex].messageText || ''
-            };
-        } else {
-            contacts.push({
-                ...contactData,
-                firstContact: contactData.firstContact || new Date().toISOString(),
-                notes: contactData.notes || ''
-            });
-        }
-
-        fs.writeFileSync(contactsFile, JSON.stringify(contacts, null, 2));
+        const contacts = getContacts();
+        applyContactUpsert(contacts, contactData);
+        fs.writeFileSync(path.join('logs', 'contacts.json'), JSON.stringify(contacts, null, 2));
     } catch (error) {
         console.error('Error guardando contacto:', error);
+    }
+}
+
+// Guarda muchos contactos de una vez (uso en sincronización de historial)
+function saveContactsBatch(items) {
+    try {
+        const contacts = getContacts();
+        for (const it of items) applyContactUpsert(contacts, it);
+        fs.writeFileSync(path.join('logs', 'contacts.json'), JSON.stringify(contacts, null, 2));
+        if (lidMapDirty) { saveLidMap(); lidMapDirty = false; }
+    } catch (error) {
+        console.error('Error guardando lote de contactos:', error);
     }
 }
 
@@ -1614,19 +1689,80 @@ function getConversation(number) {
     }
 }
 
-function getContacts() {
+// Lee los contactos crudos del archivo (sin resolver ni deduplicar)
+function getRawContacts() {
     try {
         const contactsFile = path.join('logs', 'contacts.json');
-        if (!fs.existsSync(contactsFile)) {
-            return [];
-        }
-
-        const data = fs.readFileSync(contactsFile, 'utf8');
-        return JSON.parse(data);
+        if (!fs.existsSync(contactsFile)) return [];
+        return JSON.parse(fs.readFileSync(contactsFile, 'utf8'));
     } catch (error) {
         console.error('Error obteniendo contactos:', error);
         return [];
     }
+}
+
+// Normaliza un contacto crudo: limpia sufijos @lid/@s.whatsapp.net del número
+// y resuelve el número real usando el mapa LID->número.
+function normalizeContactRecord(c) {
+    const map = getLidMap();
+    let number = (c.number || '').toString();
+    let lid = c.lid;
+    let numberType = c.numberType;
+
+    // Datos antiguos: el número puede traer el sufijo embebido
+    if (number.includes('@lid')) {
+        lid = lid || number.split('@')[0];
+        number = number.split('@')[0];
+        numberType = 'lid';
+    } else if (number.includes('@s.whatsapp.net')) {
+        number = number.split('@')[0];
+        numberType = numberType || 'real';
+    }
+
+    // Si es un LID y ya conocemos el número real, actualizar
+    if ((numberType === 'lid' || (!numberType && map[number])) && map[number]) {
+        lid = number;
+        number = map[number];
+        numberType = 'real';
+    }
+
+    if (!numberType) {
+        numberType = /^\d{7,}$/.test(number) && !lid ? 'real' : (lid ? 'lid' : 'real');
+    }
+
+    const jid = numberType === 'lid' ? `${number}@lid` : `${number}@s.whatsapp.net`;
+    return { ...c, number, lid, numberType, jid };
+}
+
+// Devuelve contactos resueltos (LID->número real) y deduplicados por número.
+function getContacts() {
+    const raw = getRawContacts();
+    const byNumber = new Map();
+
+    for (const rc of raw) {
+        const c = normalizeContactRecord(rc);
+        if (!c.number) continue;
+
+        const existing = byNumber.get(c.number);
+        if (!existing) {
+            byNumber.set(c.number, c);
+        } else {
+            // Fusionar: preferir nombre real, mensaje más reciente, conservar notas/lid
+            const merged = { ...existing };
+            const isRealName = (n) => n && !/^Usuario \d+/.test(n) && n !== 'Sin nombre';
+            if (isRealName(c.name) && !isRealName(existing.name)) merged.name = c.name;
+            if (c.lastMessage && (!existing.lastMessage || new Date(c.lastMessage) > new Date(existing.lastMessage))) {
+                merged.lastMessage = c.lastMessage;
+            }
+            merged.messageText = existing.messageText || c.messageText || '';
+            merged.notes = existing.notes || c.notes || '';
+            merged.lid = existing.lid || c.lid;
+            if (c.numberType === 'real') merged.numberType = 'real';
+            byNumber.set(c.number, merged);
+        }
+    }
+
+    return Array.from(byNumber.values());
 }
 
 // Funciones para gestión de etiquetas
