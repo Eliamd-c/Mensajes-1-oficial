@@ -109,6 +109,29 @@ let qrRetryCount = 0;
 const MAX_QR_RETRIES = 5;
 let initializationTimeout = null;
 
+// Contadores de diagnóstico: cuántas veces se dispara cada evento de Baileys
+const eventStats = {
+    'messaging-history.set': 0,
+    'chats.upsert': 0,
+    'contacts.upsert': 0,
+    'messages.upsert.notify': 0,
+    'messages.upsert.append': 0,
+    historyChats: 0,
+    historyContacts: 0,
+    historyMessages: 0,
+    lastEvent: null,
+    lastEventAt: null,
+    connectedAt: null
+};
+function trackEvent(name, extra = {}) {
+    if (eventStats[name] !== undefined) eventStats[name]++;
+    eventStats.lastEvent = name;
+    eventStats.lastEventAt = new Date().toISOString();
+    if (extra.chats) eventStats.historyChats += extra.chats;
+    if (extra.contacts) eventStats.historyContacts += extra.contacts;
+    if (extra.messages) eventStats.historyMessages += extra.messages;
+}
+
 // Función para normalizar números de teléfono
 const normalizePhoneNumber = (number) => {
     let cleanNumber = number.replace(/[\s\-\(\)\+]/g, '');
@@ -262,6 +285,7 @@ async function initializeWhatsApp() {
                 isInitializing = false;
                 qrCodeData = null;
                 qrRetryCount = 0;
+                eventStats.connectedAt = new Date().toISOString();
 
                 if (initializationTimeout) {
                     clearTimeout(initializationTimeout);
@@ -333,6 +357,7 @@ async function initializeWhatsApp() {
         // Evento principal de sincronización de historial en Baileys v6
         sock.ev.on('messaging-history.set', ({ chats, contacts, messages, progress }) => {
             console.log(`Historia sincronizada: ${chats.length} chats, ${contacts.length} contactos, ${messages.length} mensajes (progreso: ${progress || '?'}%)`);
+            trackEvent('messaging-history.set', { chats: chats?.length || 0, contacts: contacts?.length || 0, messages: messages?.length || 0 });
             const batch = [];
 
             // 1) Primero los contactos: traen lid + jid (mejor fuente para el mapa LID->número)
@@ -381,6 +406,7 @@ async function initializeWhatsApp() {
 
         // Capturar chats durante sincronización de historial
         sock.ev.on('chats.upsert', (chats) => {
+            trackEvent('chats.upsert');
             const batch = [];
             for (const chat of chats) {
                 try {
@@ -400,6 +426,7 @@ async function initializeWhatsApp() {
 
         // Capturar nombres de contactos durante sincronización (lid + jid)
         sock.ev.on('contacts.upsert', (contacts) => {
+            trackEvent('contacts.upsert');
             const batch = [];
             for (const contact of contacts) {
                 try {
@@ -421,6 +448,7 @@ async function initializeWhatsApp() {
         // Capturar mensajes en tiempo real (notify) e historial (append)
         sock.ev.on('messages.upsert', async (m) => {
             try {
+                trackEvent(m.type === 'append' ? 'messages.upsert.append' : 'messages.upsert.notify');
                 const batch = [];
                 const toLabel = [];
 
@@ -952,6 +980,33 @@ app.get('/api/crm/labels', (req, res) => {
     } catch (error) {
         res.status(500).json({ error: 'Error obteniendo etiquetas: ' + error.message });
     }
+});
+
+// Endpoint de diagnóstico: muestra qué eventos de WhatsApp han llegado
+app.get('/api/debug/state', (req, res) => {
+    let rawCount = 0, realCount = 0, lidCount = 0;
+    try {
+        const raw = getRawContacts();
+        rawCount = raw.length;
+        const resolved = getContacts();
+        realCount = resolved.filter(c => c.numberType === 'real').length;
+        lidCount = resolved.filter(c => c.numberType === 'lid').length;
+    } catch (e) { /* ignorar */ }
+
+    const lidMap = getLidMap();
+
+    res.json({
+        ready: isClientReady,
+        connectedAt: eventStats.connectedAt,
+        events: eventStats,
+        contactsRaw: rawCount,
+        contactsResueltos: realCount + lidCount,
+        contactsReal: realCount,
+        contactsLid: lidCount,
+        lidMapSize: Object.keys(lidMap).length,
+        authInfoExiste: fs.existsSync('auth_info') && fs.readdirSync('auth_info').length > 0,
+        contactsFileExiste: fs.existsSync(path.join('logs', 'contacts.json'))
+    });
 });
 
 // Endpoint para obtener estado de API key
