@@ -711,6 +711,98 @@ app.get('/api/crm/labels', (req, res) => {
     }
 });
 
+// Endpoint para escanear y etiquetar todos los contactos
+app.post('/api/crm/scan-messages', async (req, res) => {
+    if (!process.env.OPENAI_API_KEY) {
+        return res.status(400).json({
+            success: false,
+            error: 'OpenAI API key no configurada'
+        });
+    }
+
+    try {
+        const contacts = getContacts();
+        const results = {
+            total: contacts.length,
+            processed: 0,
+            labeled: 0,
+            failed: 0,
+            errors: []
+        };
+
+        for (const contact of contacts) {
+            try {
+                // Obtener el texto del mensaje del contacto
+                const messageText = contact.messageText || contact.lastMessage || '';
+
+                if (messageText && messageText.length > 5) {
+                    // Llamar a OpenAI para etiquetar
+                    const response = await openai.chat.completions.create({
+                        model: 'gpt-3.5-turbo',
+                        messages: [
+                            {
+                                role: 'system',
+                                content: `Eres un asistente que analiza mensajes de clientes y asigna etiquetas automáticas.
+Las etiquetas disponibles son: "Interesado", "Compró", "Pregunta", "Problema", "Seguimiento", "Otro".
+Responde SOLO con una lista de etiquetas separadas por comas, sin explicación adicional.
+Si no hay una etiqueta clara, responde "Otro".`
+                            },
+                            {
+                                role: 'user',
+                                content: `Analiza este mensaje de cliente y asigna etiquetas: "${messageText}"`
+                            }
+                        ],
+                        max_tokens: 50,
+                        temperature: 0.3
+                    });
+
+                    const labelsText = response.choices[0].message.content.trim();
+                    const tagsArray = labelsText.split(',').map(tag => tag.trim()).filter(tag => tag);
+
+                    // Limpiar etiquetas previas y agregar nuevas
+                    let labels = getLabels();
+                    labels[contact.number] = tagsArray;
+                    saveLabels(labels);
+
+                    results.labeled++;
+                }
+
+                results.processed++;
+
+                // Emitir progreso via Socket.IO
+                io.emit('scan-progress', {
+                    current: results.processed,
+                    total: results.total,
+                    labeled: results.labeled,
+                    contact: contact.name || contact.number
+                });
+
+            } catch (error) {
+                results.failed++;
+                results.errors.push({
+                    number: contact.number,
+                    error: error.message
+                });
+                console.error(`Error etiquetando ${contact.number}:`, error.message);
+            }
+
+            // Pequeña pausa para no sobrecargar OpenAI
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+        res.json({
+            success: true,
+            results
+        });
+    } catch (error) {
+        console.error('Error en escaneo de mensajes:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error en escaneo: ' + error.message
+        });
+    }
+});
+
 // Funciones auxiliares para envío masivo
 const getRandomDelay = (min, max) => {
     return Math.floor(Math.random() * (max - min + 1)) + min;

@@ -139,6 +139,34 @@
             </div>
         </div>
 
+        <!-- Botón de Escaneo -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <button class="btn btn-warning" id="scan-btn">
+                    <i class="fas fa-magic me-2"></i>Escanear y etiquetar todos con IA
+                </button>
+                <a href="/crm" class="btn btn-info ms-2">
+                    <i class="fas fa-tags me-2"></i>Ver en CRM
+                </a>
+            </div>
+        </div>
+
+        <!-- Progreso de Escaneo -->
+        <div class="row mb-4" id="scan-progress-container" style="display: none;">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-body">
+                        <h6>Escaneando y etiquetando contactos...</h6>
+                        <div class="progress mb-2">
+                            <div class="progress-bar progress-bar-animated" id="scan-progress-bar" role="progressbar" style="width: 0%"></div>
+                        </div>
+                        <p class="mb-1"><small id="scan-progress-text">0 de 0 contactos procesados</small></p>
+                        <p class="mb-0"><small id="scan-current-contact" class="text-muted"></small></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Lista de contactos -->
         <div class="row" id="contacts-container">
             <div class="col-12 text-center py-5">
@@ -163,10 +191,12 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
     <script>
         let allContacts = [];
         let filteredContacts = [];
         let currentFilter = null;
+        const socket = io();
 
         // Cargar contactos al iniciar
         document.addEventListener('DOMContentLoaded', loadContacts);
@@ -395,6 +425,54 @@
                 </div>
             `;
         }
+
+        // Manejador para escaneo de mensajes
+        document.getElementById('scan-btn').addEventListener('click', async () => {
+            if (!confirm('¿Escanear y etiquetar todos los contactos con IA? Esto puede tomar algunos minutos.')) {
+                return;
+            }
+
+            const scanBtn = document.getElementById('scan-btn');
+            scanBtn.disabled = true;
+            scanBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Escaneando...';
+
+            const progressContainer = document.getElementById('scan-progress-container');
+            progressContainer.style.display = 'block';
+
+            try {
+                const response = await fetch('/api/crm/scan-messages', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert(`Escaneo completado: ${result.results.labeled} contactos etiquetados`, 'success');
+                    setTimeout(() => {
+                        loadContacts();
+                    }, 1000);
+                } else {
+                    showAlert('Error: ' + result.error, 'danger');
+                }
+            } catch (error) {
+                showAlert('Error en escaneo: ' + error.message, 'danger');
+            } finally {
+                scanBtn.disabled = false;
+                scanBtn.innerHTML = '<i class="fas fa-magic me-2"></i>Escanear y etiquetar todos con IA';
+                progressContainer.style.display = 'none';
+            }
+        });
+
+        // Escuchar progreso de escaneo via Socket.IO
+        socket.on('scan-progress', (data) => {
+            const percentage = (data.current / data.total) * 100;
+            document.getElementById('scan-progress-bar').style.width = percentage + '%';
+            document.getElementById('scan-progress-text').textContent =
+                `${data.current} de ${data.total} contactos procesados (${data.labeled} etiquetados)`;
+            document.getElementById('scan-current-contact').textContent =
+                `Procesando: ${data.contact}`;
+        });
     </script>
 </body>
 </html>
