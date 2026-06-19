@@ -208,10 +208,8 @@ async function initializeWhatsApp() {
                     initializationTimeout = null;
                 }
 
-                // Cargar historial de conversaciones al conectar
-                loadConversationHistory(sock).catch(err => {
-                    console.error('Error cargando historial:', err.message);
-                });
+                // No cargar historial automáticamente para evitar inestabilidad
+                // El usuario puede hacerlo manualmente desde el CRM
 
                 console.log('Notificando a clientes que WhatsApp está listo...');
                 io.emit('ready');
@@ -303,35 +301,74 @@ async function loadConversationHistory(sock) {
     try {
         console.log('Cargando historial de conversaciones...');
 
+        if (!sock || !sock.store) {
+            console.warn('WhatsApp store no disponible');
+            return;
+        }
+
         // Obtener todos los chats
-        const allChats = sock.store?.chats?.all() || [];
+        let allChats = [];
+        try {
+            if (typeof sock.store.chats.all === 'function') {
+                allChats = sock.store.chats.all();
+            } else if (Array.isArray(sock.store.chats)) {
+                allChats = sock.store.chats;
+            } else if (sock.store.chats instanceof Map) {
+                allChats = Array.from(sock.store.chats.values());
+            }
+        } catch (error) {
+            console.warn('No se pudieron obtener los chats:', error.message);
+            return;
+        }
+
         let processedContacts = 0;
 
         for (const chat of allChats) {
             try {
+                if (!chat || !chat.id) continue;
+
                 // Saltar grupos
                 if (chat.id.includes('@g.us')) continue;
 
                 const number = chat.id.replace('@s.whatsapp.net', '');
+                if (!number || number.length < 5) continue;
 
                 // Obtener mensajes del chat
-                const messages = sock.store?.messages?.[chat.id]?.all() || [];
+                let messages = [];
+                try {
+                    if (sock.store.messages && sock.store.messages[chat.id]) {
+                        const msgStore = sock.store.messages[chat.id];
+                        if (typeof msgStore.all === 'function') {
+                            messages = msgStore.all();
+                        } else if (Array.isArray(msgStore)) {
+                            messages = msgStore;
+                        } else if (msgStore instanceof Map) {
+                            messages = Array.from(msgStore.values());
+                        }
+                    }
+                } catch (error) {
+                    console.log(`No hay mensajes para ${number}`);
+                }
 
                 if (messages.length > 0) {
                     // Obtener los últimos 10 mensajes entrantes
                     const incomingMessages = messages
-                        .filter(msg => !msg.key.fromMe && msg.message)
+                        .filter(msg => msg && msg.key && !msg.key.fromMe && msg.message)
                         .slice(-10);
 
                     if (incomingMessages.length > 0) {
                         // Extraer texto de todos los mensajes
                         const texts = incomingMessages
                             .map(msg => {
-                                return msg.message?.conversation ||
-                                       msg.message?.extendedTextMessage?.text ||
-                                       '';
+                                try {
+                                    return msg.message?.conversation ||
+                                           msg.message?.extendedTextMessage?.text ||
+                                           '';
+                                } catch (e) {
+                                    return '';
+                                }
                             })
-                            .filter(text => text.length > 0)
+                            .filter(text => text && text.length > 0)
                             .join(' ');
 
                         if (texts.length > 5) {
@@ -342,7 +379,7 @@ async function loadConversationHistory(sock) {
                     }
                 }
             } catch (error) {
-                console.error(`Error procesando chat ${chat.id}:`, error.message);
+                console.error(`Error procesando chat:`, error.message);
             }
         }
 
