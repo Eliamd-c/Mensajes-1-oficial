@@ -96,6 +96,9 @@
                 <a class="nav-link" href="/dashboard">Dashboard</a>
                 <a class="nav-link" href="/contacts">Contactos</a>
                 <a class="nav-link active" href="/crm">CRM</a>
+                <button class="nav-link btn btn-link" onclick="openConfigModal()" id="config-btn" style="border: none; background: none;">
+                    <i class="fas fa-cog me-1"></i><span id="api-status">⚙️</span>
+                </button>
             </div>
         </div>
     </nav>
@@ -175,6 +178,48 @@
         </div>
     </div>
 
+    <!-- Modal para configurar API key -->
+    <div class="modal fade" id="configModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-warning">
+                    <h5 class="modal-title">
+                        <i class="fas fa-key me-2"></i>Configurar OpenAI API Key
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="api-config-status" class="alert" style="display: none;"></div>
+
+                    <div class="mb-3">
+                        <label class="form-label">OpenAI API Key</label>
+                        <input type="password" class="form-control" id="api-key-input" placeholder="sk-proj-...">
+                        <small class="text-muted">
+                            <i class="fas fa-info-circle me-1"></i>
+                            Obtén tu key en <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>
+                        </small>
+                    </div>
+
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="show-key-checkbox">
+                        <label class="form-check-label" for="show-key-checkbox">
+                            Mostrar contraseña
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-danger" id="remove-key-btn" style="display: none;">
+                        <i class="fas fa-trash me-2"></i>Eliminar Key
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                    <button type="button" class="btn btn-success" id="save-key-btn">
+                        <i class="fas fa-save me-2"></i>Guardar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Modal para editar etiquetas -->
     <div class="modal fade" id="editLabelsModal" tabindex="-1">
         <div class="modal-dialog">
@@ -219,12 +264,15 @@
         let allLabels = [];
         let editingNumber = null;
         const editLabelsModal = new bootstrap.Modal(document.getElementById('editLabelsModal'));
+        const configModal = new bootstrap.Modal(document.getElementById('configModal'));
         const socket = io();
 
         // Cargar contactos al iniciar
         document.addEventListener('DOMContentLoaded', () => {
             loadContacts();
             loadLabels();
+            checkOpenAIStatus();
+            setupConfigHandlers();
         });
 
         async function loadContacts(label = null) {
@@ -568,6 +616,123 @@
             document.getElementById('scan-current-contact').textContent =
                 `Procesando: ${data.contact}`;
         });
+
+        // Funciones para configurar API key
+        function openConfigModal() {
+            configModal.show();
+        }
+
+        async function checkOpenAIStatus() {
+            try {
+                const response = await fetch('/api/config/openai-status');
+                const data = await response.json();
+
+                const statusEl = document.getElementById('api-status');
+                const removeBtn = document.getElementById('remove-key-btn');
+
+                if (data.configured) {
+                    statusEl.textContent = '✅';
+                    removeBtn.style.display = 'block';
+                    document.getElementById('api-key-input').placeholder = `Configurada: ${data.keyPrefix}`;
+                } else {
+                    statusEl.textContent = '⚠️';
+                    removeBtn.style.display = 'none';
+                    document.getElementById('api-key-input').placeholder = 'sk-proj-...';
+                }
+            } catch (error) {
+                console.error('Error verificando OpenAI:', error);
+            }
+        }
+
+        function setupConfigHandlers() {
+            // Mostrar/ocultar contraseña
+            document.getElementById('show-key-checkbox').addEventListener('change', (e) => {
+                const input = document.getElementById('api-key-input');
+                input.type = e.target.checked ? 'text' : 'password';
+            });
+
+            // Guardar API key
+            document.getElementById('save-key-btn').addEventListener('click', saveOpenAIKey);
+
+            // Eliminar API key
+            document.getElementById('remove-key-btn').addEventListener('click', removeOpenAIKey);
+        }
+
+        async function saveOpenAIKey() {
+            const apiKey = document.getElementById('api-key-input').value.trim();
+
+            if (!apiKey) {
+                showAlert('La API key no puede estar vacía', 'warning');
+                return;
+            }
+
+            const saveBtn = document.getElementById('save-key-btn');
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Guardando...';
+
+            try {
+                const response = await fetch('/api/config/openai-key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ apiKey })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('API key configurada correctamente', 'success');
+                    document.getElementById('api-key-input').value = '';
+                    checkOpenAIStatus();
+
+                    setTimeout(() => {
+                        configModal.hide();
+                    }, 1000);
+                } else {
+                    showAlert('Error: ' + result.error, 'danger');
+                }
+            } catch (error) {
+                showAlert('Error guardando API key: ' + error.message, 'danger');
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fas fa-save me-2"></i>Guardar';
+            }
+        }
+
+        async function removeOpenAIKey() {
+            if (!confirm('¿Estás seguro de que quieres eliminar la API key?')) {
+                return;
+            }
+
+            const removeBtn = document.getElementById('remove-key-btn');
+            removeBtn.disabled = true;
+            removeBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Eliminando...';
+
+            try {
+                const response = await fetch('/api/config/openai-key-remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showAlert('API key eliminada', 'success');
+                    document.getElementById('api-key-input').value = '';
+                    checkOpenAIStatus();
+
+                    setTimeout(() => {
+                        configModal.hide();
+                    }, 1000);
+                } else {
+                    showAlert('Error: ' + result.error, 'danger');
+                }
+            } catch (error) {
+                showAlert('Error eliminando API key: ' + error.message, 'danger');
+            } finally {
+                removeBtn.disabled = false;
+                removeBtn.innerHTML = '<i class="fas fa-trash me-2"></i>Eliminar Key';
+            }
+        }
     </script>
 </body>
 </html>

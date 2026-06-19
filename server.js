@@ -17,9 +17,43 @@ const server = http.createServer(app);
 const io = socketIo(server);
 
 // Inicializar OpenAI
-const openai = new OpenAI({
+let openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY || ''
 });
+
+// Función para obtener configuración guardada
+function getConfig() {
+    try {
+        const configFile = path.join('logs', 'config.json');
+        if (fs.existsSync(configFile)) {
+            const data = fs.readFileSync(configFile, 'utf8');
+            return JSON.parse(data);
+        }
+        return {};
+    } catch (error) {
+        console.error('Error leyendo config:', error);
+        return {};
+    }
+}
+
+// Función para guardar configuración
+function saveConfig(config) {
+    try {
+        const configFile = path.join('logs', 'config.json');
+        fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+    } catch (error) {
+        console.error('Error guardando config:', error);
+    }
+}
+
+// Cargar API key desde configuración guardada si no está en .env
+const config = getConfig();
+if (!process.env.OPENAI_API_KEY && config.OPENAI_API_KEY) {
+    process.env.OPENAI_API_KEY = config.OPENAI_API_KEY;
+    openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY
+    });
+}
 
 // Crear directorios necesarios si no existen
 ['uploads', 'uploads/images', 'public', 'logs', 'auth_info'].forEach(dir => {
@@ -708,6 +742,87 @@ app.get('/api/crm/labels', (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: 'Error obteniendo etiquetas: ' + error.message });
+    }
+});
+
+// Endpoint para obtener estado de API key
+app.get('/api/config/openai-status', (req, res) => {
+    const hasKey = !!process.env.OPENAI_API_KEY;
+    res.json({
+        success: true,
+        configured: hasKey,
+        keyPrefix: hasKey ? process.env.OPENAI_API_KEY.substring(0, 10) + '...' : null
+    });
+});
+
+// Endpoint para guardar API key
+app.post('/api/config/openai-key', (req, res) => {
+    try {
+        const { apiKey } = req.body;
+
+        if (!apiKey || !apiKey.trim()) {
+            return res.status(400).json({
+                success: false,
+                error: 'API key no puede estar vacía'
+            });
+        }
+
+        if (!apiKey.startsWith('sk-proj-')) {
+            return res.status(400).json({
+                success: false,
+                error: 'API key inválida. Debe comenzar con sk-proj-'
+            });
+        }
+
+        // Guardar en configuración
+        const config = getConfig();
+        config.OPENAI_API_KEY = apiKey;
+        saveConfig(config);
+
+        // Actualizar variable de entorno
+        process.env.OPENAI_API_KEY = apiKey;
+
+        // Reinitializar OpenAI con nueva key
+        openai = new OpenAI({
+            apiKey: apiKey
+        });
+
+        res.json({
+            success: true,
+            message: 'API key configurada correctamente',
+            keyPrefix: apiKey.substring(0, 10) + '...'
+        });
+    } catch (error) {
+        console.error('Error configurando API key:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error configurando API key: ' + error.message
+        });
+    }
+});
+
+// Endpoint para eliminar API key
+app.post('/api/config/openai-key-remove', (req, res) => {
+    try {
+        const config = getConfig();
+        delete config.OPENAI_API_KEY;
+        saveConfig(config);
+
+        process.env.OPENAI_API_KEY = '';
+        openai = new OpenAI({
+            apiKey: ''
+        });
+
+        res.json({
+            success: true,
+            message: 'API key eliminada'
+        });
+    } catch (error) {
+        console.error('Error eliminando API key:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Error eliminando API key: ' + error.message
+        });
     }
 });
 
