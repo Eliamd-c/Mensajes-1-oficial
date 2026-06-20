@@ -8,9 +8,20 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { v4: uuidv4 } = require('uuid');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('baileys');
 const OpenAI = require('openai');
+
+// ====== Directorio de datos PERSISTENTE ======
+// CRÍTICO: Hostinger borra el directorio del repo en cada deploy. Por eso
+// guardamos la sesión de WhatsApp (auth_info) y los datos (logs) FUERA del
+// repo, en el home del usuario, que sí persiste entre deploys.
+// Se puede sobreescribir con la variable de entorno DATA_DIR.
+const DATA_DIR = process.env.DATA_DIR || path.join(os.homedir(), '.mensajes_whatsapp_data');
+const LOGS_DIR = path.join(DATA_DIR, 'logs');
+const AUTH_DIR = path.join(DATA_DIR, 'auth_info');
+console.log(`Directorio de datos persistente: ${DATA_DIR}`);
 
 const app = express();
 const server = http.createServer(app);
@@ -24,7 +35,7 @@ let openai = new OpenAI({
 // Función para obtener configuración guardada
 function getConfig() {
     try {
-        const configFile = path.join('logs', 'config.json');
+        const configFile = path.join(LOGS_DIR,'config.json');
         if (fs.existsSync(configFile)) {
             const data = fs.readFileSync(configFile, 'utf8');
             return JSON.parse(data);
@@ -39,7 +50,7 @@ function getConfig() {
 // Función para guardar configuración
 function saveConfig(config) {
     try {
-        const configFile = path.join('logs', 'config.json');
+        const configFile = path.join(LOGS_DIR,'config.json');
         fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
     } catch (error) {
         console.error('Error guardando config:', error);
@@ -56,7 +67,8 @@ if (!process.env.OPENAI_API_KEY && config.OPENAI_API_KEY) {
 }
 
 // Crear directorios necesarios si no existen
-['uploads', 'uploads/images', 'public', 'logs', 'auth_info'].forEach(dir => {
+// uploads/public viven en el repo (temporales); logs/auth_info en DATA_DIR (persistente)
+['uploads', 'uploads/images', 'public', LOGS_DIR, AUTH_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
@@ -163,7 +175,7 @@ let lidMapCache = null;
 function getLidMap() {
     if (lidMapCache) return lidMapCache;
     try {
-        const f = path.join('logs', 'lid_map.json');
+        const f = path.join(LOGS_DIR,'lid_map.json');
         lidMapCache = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : {};
     } catch (e) {
         lidMapCache = {};
@@ -172,7 +184,7 @@ function getLidMap() {
 }
 function saveLidMap() {
     try {
-        fs.writeFileSync(path.join('logs', 'lid_map.json'), JSON.stringify(lidMapCache || {}, null, 2));
+        fs.writeFileSync(path.join(LOGS_DIR,'lid_map.json'), JSON.stringify(lidMapCache || {}, null, 2));
     } catch (e) { /* ignorar */ }
 }
 let lidMapDirty = false;
@@ -230,7 +242,7 @@ async function initializeWhatsApp() {
     }, 120000);
 
     try {
-        const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
         const { version } = await fetchLatestBaileysVersion();
 
         sock = makeWASocket({
@@ -328,9 +340,9 @@ async function initializeWhatsApp() {
                 } else {
                     console.log('Sesión cerrada. Limpiando credenciales...');
                     qrRetryCount = 0;
-                    if (fs.existsSync('auth_info')) {
-                        fs.rmSync('auth_info', { recursive: true, force: true });
-                        fs.mkdirSync('auth_info', { recursive: true });
+                    if (fs.existsSync(AUTH_DIR)) {
+                        fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+                        fs.mkdirSync(AUTH_DIR, { recursive: true });
                     }
                     setTimeout(() => initializeWhatsApp(), 3000);
                 }
@@ -516,7 +528,7 @@ async function extractAllContactsFromWhatsApp() {
 // Esta función reporta el estado actual.
 async function loadConversationHistory() {
     try {
-        const conversationsFile = path.join('logs', 'conversations.json');
+        const conversationsFile = path.join(LOGS_DIR,'conversations.json');
         let count = 0;
         if (fs.existsSync(conversationsFile)) {
             const data = JSON.parse(fs.readFileSync(conversationsFile, 'utf8'));
@@ -601,9 +613,9 @@ app.post('/request-qr', async (req, res) => {
         }
 
         // Limpiar auth para forzar nuevo QR
-        if (fs.existsSync('auth_info')) {
-            fs.rmSync('auth_info', { recursive: true, force: true });
-            fs.mkdirSync('auth_info', { recursive: true });
+        if (fs.existsSync(AUTH_DIR)) {
+            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+            fs.mkdirSync(AUTH_DIR, { recursive: true });
         }
 
         setTimeout(() => initializeWhatsApp(), 1000);
@@ -709,7 +721,7 @@ app.get('/campaigns', (req, res) => {
 app.get('/campaigns/:id', (req, res) => {
     try {
         const campaignId = req.params.id;
-        const logFile = path.join('logs', `campaign_${campaignId}.json`);
+        const logFile = path.join(LOGS_DIR,`campaign_${campaignId}.json`);
 
         if (!fs.existsSync(logFile)) {
             return res.status(404).json({ error: 'Campaña no encontrada' });
@@ -1004,8 +1016,9 @@ app.get('/api/debug/state', (req, res) => {
         contactsReal: realCount,
         contactsLid: lidCount,
         lidMapSize: Object.keys(lidMap).length,
-        authInfoExiste: fs.existsSync('auth_info') && fs.readdirSync('auth_info').length > 0,
-        contactsFileExiste: fs.existsSync(path.join('logs', 'contacts.json'))
+        authInfoExiste: fs.existsSync(AUTH_DIR) && fs.readdirSync(AUTH_DIR).length > 0,
+        dataDir: DATA_DIR,
+        contactsFileExiste: fs.existsSync(path.join(LOGS_DIR,'contacts.json'))
     });
 });
 
@@ -1539,7 +1552,7 @@ io.on('connection', (socket) => {
 // Compactar y normalizar contactos existentes al arrancar (limpia sufijos @lid antiguos)
 function compactContactsFile() {
     try {
-        const contactsFile = path.join('logs', 'contacts.json');
+        const contactsFile = path.join(LOGS_DIR,'contacts.json');
         if (!fs.existsSync(contactsFile)) return;
         const clean = getContacts(); // normaliza + deduplica
         fs.writeFileSync(contactsFile, JSON.stringify(clean, null, 2));
@@ -1573,7 +1586,7 @@ process.on('SIGINT', gracefulShutdown);
 // Funciones de logging y seguimiento
 function saveCampaign(campaignData) {
     try {
-        const campaignsFile = path.join('logs', 'campaigns.json');
+        const campaignsFile = path.join(LOGS_DIR,'campaigns.json');
         let campaigns = [];
 
         if (fs.existsSync(campaignsFile)) {
@@ -1584,7 +1597,7 @@ function saveCampaign(campaignData) {
         campaigns.push(campaignData);
         fs.writeFileSync(campaignsFile, JSON.stringify(campaigns, null, 2));
 
-        const logFile = path.join('logs', `campaign_${campaignData.id}.json`);
+        const logFile = path.join(LOGS_DIR,`campaign_${campaignData.id}.json`);
         fs.writeFileSync(logFile, JSON.stringify(campaignData, null, 2));
 
         console.log(`Campaña guardada: ${campaignData.id}`);
@@ -1595,7 +1608,7 @@ function saveCampaign(campaignData) {
 
 function getCampaigns() {
     try {
-        const campaignsFile = path.join('logs', 'campaigns.json');
+        const campaignsFile = path.join(LOGS_DIR,'campaigns.json');
         if (fs.existsSync(campaignsFile)) {
             const data = fs.readFileSync(campaignsFile, 'utf8');
             return JSON.parse(data);
@@ -1609,7 +1622,7 @@ function getCampaigns() {
 
 function getFailedNumbers(campaignId) {
     try {
-        const logFile = path.join('logs', `campaign_${campaignId}.json`);
+        const logFile = path.join(LOGS_DIR,`campaign_${campaignId}.json`);
         if (fs.existsSync(logFile)) {
             const data = fs.readFileSync(logFile, 'utf8');
             const campaign = JSON.parse(data);
@@ -1656,7 +1669,7 @@ function saveContact(contactData) {
     try {
         const contacts = getContacts();
         applyContactUpsert(contacts, contactData);
-        fs.writeFileSync(path.join('logs', 'contacts.json'), JSON.stringify(contacts, null, 2));
+        fs.writeFileSync(path.join(LOGS_DIR,'contacts.json'), JSON.stringify(contacts, null, 2));
     } catch (error) {
         console.error('Error guardando contacto:', error);
     }
@@ -1667,7 +1680,7 @@ function saveContactsBatch(items) {
     try {
         const contacts = getContacts();
         for (const it of items) applyContactUpsert(contacts, it);
-        fs.writeFileSync(path.join('logs', 'contacts.json'), JSON.stringify(contacts, null, 2));
+        fs.writeFileSync(path.join(LOGS_DIR,'contacts.json'), JSON.stringify(contacts, null, 2));
         if (lidMapDirty) { saveLidMap(); lidMapDirty = false; }
     } catch (error) {
         console.error('Error guardando lote de contactos:', error);
@@ -1680,7 +1693,7 @@ app.post('/api/crm/contact/:number/notes', (req, res) => {
         const { number } = req.params;
         const { notes } = req.body;
 
-        const contactsFile = path.join('logs', 'contacts.json');
+        const contactsFile = path.join(LOGS_DIR,'contacts.json');
         let contacts = [];
 
         if (fs.existsSync(contactsFile)) {
@@ -1713,7 +1726,7 @@ app.post('/api/crm/contact/:number/notes', (req, res) => {
 
 function saveConversation(number, text) {
     try {
-        const conversationsFile = path.join('logs', 'conversations.json');
+        const conversationsFile = path.join(LOGS_DIR,'conversations.json');
         let conversations = {};
 
         if (fs.existsSync(conversationsFile)) {
@@ -1730,7 +1743,7 @@ function saveConversation(number, text) {
 
 function getConversation(number) {
     try {
-        const conversationsFile = path.join('logs', 'conversations.json');
+        const conversationsFile = path.join(LOGS_DIR,'conversations.json');
         if (!fs.existsSync(conversationsFile)) {
             return null;
         }
@@ -1747,7 +1760,7 @@ function getConversation(number) {
 // Lee los contactos crudos del archivo (sin resolver ni deduplicar)
 function getRawContacts() {
     try {
-        const contactsFile = path.join('logs', 'contacts.json');
+        const contactsFile = path.join(LOGS_DIR,'contacts.json');
         if (!fs.existsSync(contactsFile)) return [];
         return JSON.parse(fs.readFileSync(contactsFile, 'utf8'));
     } catch (error) {
@@ -1823,7 +1836,7 @@ function getContacts() {
 // Funciones para gestión de etiquetas
 function getLabels() {
     try {
-        const labelsFile = path.join('logs', 'labels.json');
+        const labelsFile = path.join(LOGS_DIR,'labels.json');
         if (!fs.existsSync(labelsFile)) {
             return {};
         }
@@ -1838,7 +1851,7 @@ function getLabels() {
 
 function saveLabels(labels) {
     try {
-        const labelsFile = path.join('logs', 'labels.json');
+        const labelsFile = path.join(LOGS_DIR,'labels.json');
         fs.writeFileSync(labelsFile, JSON.stringify(labels, null, 2));
     } catch (error) {
         console.error('Error guardando etiquetas:', error);
