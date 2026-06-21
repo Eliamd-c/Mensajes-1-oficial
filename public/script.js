@@ -439,6 +439,18 @@ document.addEventListener('DOMContentLoaded', () => {
         .catch(error => {
             console.error('Error obteniendo estado:', error);
         });
+
+    // Si venimos del CRM con números para enviar, precargarlos en el textarea
+    const bulkNumbers = localStorage.getItem('bulkNumbers');
+    if (bulkNumbers) {
+        const textarea = document.getElementById('bulk-numbers');
+        if (textarea) {
+            textarea.value = bulkNumbers;
+            textarea.dispatchEvent(new Event('input'));
+            textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        localStorage.removeItem('bulkNumbers');
+    }
 });
 
 // Manejo de archivos CSV

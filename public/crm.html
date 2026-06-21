@@ -143,7 +143,7 @@
         <div class="row mb-3">
             <div class="col-12">
                 <button class="btn btn-info" id="load-history-btn">
-                    <i class="fas fa-download me-2"></i>Cargar historial de WhatsApp
+                    <i class="fas fa-sync me-2"></i>Actualizar contactos
                 </button>
                 <button class="btn btn-success ms-2" id="bulk-action-btn" style="display: none;">
                     <i class="fas fa-envelope me-2"></i>Enviar mensaje masivo a filtrados
@@ -249,7 +249,7 @@
                 <div class="modal-body">
                     <div class="mb-3">
                         <label class="form-label">Contacto: <strong id="modal-contact-name"></strong></label>
-                        <div class="text-muted">+<span id="modal-contact-number"></span></div>
+                        <div class="text-muted"><span id="modal-contact-number"></span></div>
                     </div>
 
                     <div class="mb-3">
@@ -265,12 +265,20 @@
                     <div class="mb-3">
                         <label class="form-label">Agregar Etiqueta:</label>
                         <div class="tag-input">
-                            <select class="form-select" id="available-labels-select">
-                                <option value="">Selecciona una etiqueta...</option>
-                            </select>
+                            <input type="text" class="form-control" id="new-label-input"
+                                   list="labels-datalist" placeholder="Escribe o elige una etiqueta...">
+                            <datalist id="labels-datalist"></datalist>
                             <button class="btn btn-success" onclick="addLabelToContact()">
                                 <i class="fas fa-plus"></i> Agregar
                             </button>
+                        </div>
+                        <small class="text-muted">Puedes crear una etiqueta nueva escribiéndola y pulsando Agregar.</small>
+                    </div>
+
+                    <div class="mb-2">
+                        <label class="form-label"><i class="fab fa-whatsapp text-success me-1"></i>Conversación:</label>
+                        <div id="conversation-box" style="max-height: 220px; overflow-y: auto; background:#ece5dd; border-radius:8px; padding:10px;">
+                            <p class="text-muted small mb-0">Cargando conversación...</p>
                         </div>
                     </div>
                 </div>
@@ -295,12 +303,29 @@
         const configModal = new bootstrap.Modal(document.getElementById('configModal'));
         const socket = io();
 
+        // Escapa texto para insertarlo de forma segura en HTML
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         // Cargar contactos al iniciar
         document.addEventListener('DOMContentLoaded', () => {
             loadContacts();
             loadLabels();
             checkOpenAIStatus();
             setupConfigHandlers();
+
+            // Listeners registrados UNA sola vez (evita duplicados al re-renderizar)
+            document.getElementById('search-input').addEventListener('input', filterContacts);
+            document.getElementById('label-filter').addEventListener('change', (e) => {
+                loadContacts(e.target.value);
+            });
         });
 
         async function loadContacts(label = null) {
@@ -375,9 +400,6 @@
             }
 
             select.value = currentValue;
-            select.addEventListener('change', (e) => {
-                loadContacts(e.target.value);
-            });
         }
 
         function displayContacts() {
@@ -409,22 +431,22 @@
                                         ${initials}
                                     </div>
                                     <div class="flex-grow-1">
-                                        <h6 class="mb-1">${contact.name}</h6>
+                                        <h6 class="mb-1">${escapeHtml(contact.name)}</h6>
                                         <div class="text-muted small">
                                             ${contact.numberType === 'lid'
                                                 ? `<span class="badge bg-warning text-dark" title="WhatsApp oculta el número real de este contacto. Aparecerá cuando te escriba un mensaje nuevo."><i class="fas fa-user-secret me-1"></i>Número oculto</span>`
-                                                : `+${contact.number}`}
+                                                : `<a href="https://wa.me/${contact.number}" target="_blank" class="text-decoration-none" title="Abrir chat en WhatsApp"><i class="fab fa-whatsapp text-success me-1"></i>+${contact.number}</a>`}
                                         </div>
                                         <div class="text-muted small">
                                             <i class="fas fa-clock me-1"></i>${lastMessageDate}
                                         </div>
                                         <div class="mt-2">
                                             ${contact.tags && contact.tags.length > 0 ?
-                                                contact.tags.map(tag => `<span class="label-badge">${tag}</span>`).join('') :
+                                                contact.tags.map(tag => `<span class="label-badge">${escapeHtml(tag)}</span>`).join('') :
                                                 '<span class="text-muted small">Sin etiquetas</span>'
                                             }
                                         </div>
-                                        <button class="btn btn-sm btn-outline-success mt-2" onclick="openEditLabels('${contact.number}', '${contact.name}')">
+                                        <button class="btn btn-sm btn-outline-success mt-2 btn-editar" data-number="${escapeHtml(contact.number)}">
                                             <i class="fas fa-edit me-1"></i>Editar
                                         </button>
                                     </div>
@@ -437,8 +459,10 @@
 
             container.innerHTML = contactsHTML;
 
-            // Agregar búsqueda
-            document.getElementById('search-input').addEventListener('input', filterContacts);
+            // Delegación: botón Editar (evita inyección por nombres con comillas)
+            container.querySelectorAll('.btn-editar').forEach(btn => {
+                btn.addEventListener('click', () => openEditLabels(btn.dataset.number));
+            });
         }
 
         function filterByLabel(label) {
@@ -461,13 +485,14 @@
             document.getElementById('total-contacts-stat').textContent = data.total || 0;
         }
 
-        function openEditLabels(number, name) {
+        function openEditLabels(number) {
             editingNumber = number;
-            document.getElementById('modal-contact-name').textContent = name;
-            document.getElementById('modal-contact-number').textContent = number;
-
-            // Cargar contacto y sus datos
             const contact = allContacts.find(c => c.number === number);
+            const name = contact?.name || 'Contacto';
+            document.getElementById('modal-contact-name').textContent = name;
+            document.getElementById('modal-contact-number').textContent =
+                contact?.numberType === 'lid' ? 'Número oculto (LID)' : '+' + number;
+
             const currentLabels = contact?.tags || [];
 
             // Cargar notas
@@ -477,31 +502,62 @@
             labelsDiv.innerHTML = currentLabels.length > 0 ?
                 currentLabels.map(label => `
                     <span class="label-badge">
-                        ${label}
-                        <button type="button" class="btn-remove" onclick="removeLabelFromContact('${number}', '${label}')">
+                        ${escapeHtml(label)}
+                        <button type="button" class="btn-remove" data-label="${escapeHtml(label)}">
                             <i class="fas fa-times"></i>
                         </button>
                     </span>
                 `).join('') :
                 '<p class="text-muted">Sin etiquetas</p>';
+            // Delegación para quitar etiquetas
+            labelsDiv.querySelectorAll('.btn-remove').forEach(btn => {
+                btn.addEventListener('click', () => removeLabelFromContact(number, btn.dataset.label));
+            });
 
-            // Cargar etiquetas disponibles
-            const availableSelect = document.getElementById('available-labels-select');
-            availableSelect.innerHTML = '<option value="">Selecciona una etiqueta...</option>';
-            for (const label of allLabels) {
-                if (!currentLabels.includes(label)) {
-                    const option = document.createElement('option');
-                    option.value = label;
-                    option.textContent = label;
-                    availableSelect.appendChild(option);
-                }
-            }
+            // Etiquetas sugeridas en el datalist (permite escribir nuevas)
+            const datalist = document.getElementById('labels-datalist');
+            datalist.innerHTML = allLabels
+                .filter(l => !currentLabels.includes(l))
+                .map(l => `<option value="${escapeHtml(l)}">`).join('');
+            document.getElementById('new-label-input').value = '';
+
+            // Cargar la conversación del contacto
+            loadConversation(number);
 
             editLabelsModal.show();
         }
 
+        async function loadConversation(number) {
+            const box = document.getElementById('conversation-box');
+            box.innerHTML = '<p class="text-muted small mb-0">Cargando conversación...</p>';
+            try {
+                const res = await fetch(`/api/crm/contact/${number}/conversation`);
+                const data = await res.json();
+                const msgs = (data.success && data.messages) ? data.messages : [];
+                if (msgs.length === 0) {
+                    box.innerHTML = '<p class="text-muted small mb-0">No hay mensajes guardados de este contacto.</p>';
+                    return;
+                }
+                box.innerHTML = msgs.map(m => {
+                    const fecha = m.t ? new Date(m.t).toLocaleString('es-ES') : '';
+                    const align = m.fromMe ? 'text-end' : 'text-start';
+                    const bg = m.fromMe ? 'background:#dcf8c6;' : 'background:#fff;';
+                    return `<div class="${align} mb-1">
+                        <span style="display:inline-block; ${bg} border:1px solid #e0e0e0; border-radius:8px; padding:5px 9px; max-width:85%; font-size:0.85rem; text-align:left;">
+                            ${escapeHtml(m.text)}
+                            <div class="text-muted" style="font-size:0.7rem;">${fecha}</div>
+                        </span>
+                    </div>`;
+                }).join('');
+                box.scrollTop = box.scrollHeight;
+            } catch (e) {
+                box.innerHTML = '<p class="text-danger small mb-0">Error cargando la conversación.</p>';
+            }
+        }
+
         async function addLabelToContact() {
-            const label = document.getElementById('available-labels-select').value;
+            const input = document.getElementById('new-label-input');
+            const label = input.value.trim();
             if (!label) return;
 
             try {
@@ -512,9 +568,9 @@
                 });
 
                 if (response.ok) {
-                    loadContacts();
-                    loadLabels();
-                    openEditLabels(editingNumber, document.getElementById('modal-contact-name').textContent);
+                    await loadContacts(document.getElementById('label-filter').value || null);
+                    await loadLabels();
+                    openEditLabels(editingNumber);
                     showAlert('Etiqueta agregada', 'success');
                 }
             } catch (error) {
@@ -524,14 +580,14 @@
 
         async function removeLabelFromContact(number, label) {
             try {
-                const response = await fetch(`/api/crm/contact/${number}/label/${label}`, {
+                const response = await fetch(`/api/crm/contact/${number}/label/${encodeURIComponent(label)}`, {
                     method: 'DELETE'
                 });
 
                 if (response.ok) {
-                    loadContacts();
-                    loadLabels();
-                    openEditLabels(number, document.getElementById('modal-contact-name').textContent);
+                    await loadContacts(document.getElementById('label-filter').value || null);
+                    await loadLabels();
+                    openEditLabels(number);
                     showAlert('Etiqueta eliminada', 'success');
                 }
             } catch (error) {
@@ -616,53 +672,39 @@
             `;
         }
 
-        // Manejador para envío masivo
+        // Manejador para envío masivo: lleva los números reales a la página de envío
         document.getElementById('bulk-action-btn').addEventListener('click', () => {
-            const numbers = filteredContacts.map(c => c.number).join('\n');
-            const csvContent = numbers;
+            // Solo contactos con número real (los LID no se pueden enviar por número)
+            const reales = filteredContacts.filter(c => c.numberType !== 'lid').map(c => c.number);
+            const ocultos = filteredContacts.length - reales.length;
 
-            // Guardar en localStorage para la página de envío
-            localStorage.setItem('bulkNumbers', csvContent);
-            localStorage.setItem('bulkMessage', '');
-
-            window.location.href = '/#bulk-section';
-            setTimeout(() => {
-                alert('Copia los contactos desde CRM. Ahora ve a Enviar Mensajes y pega los números.');
-            }, 500);
-        });
-
-        // Manejador para cargar historial
-        document.getElementById('load-history-btn').addEventListener('click', async () => {
-            if (!confirm('¿Cargar historial de WhatsApp? Esto puede tomar algunos minutos. Se extraerán los últimos mensajes de cada conversación.')) {
+            if (reales.length === 0) {
+                showAlert('Ninguno de los contactos filtrados tiene número real para enviar.', 'warning');
                 return;
             }
 
+            let msg = `Se enviarán al formulario ${reales.length} números.`;
+            if (ocultos > 0) msg += ` (${ocultos} con número oculto/LID se omitieron)`;
+            if (!confirm(msg + '\n\n¿Continuar?')) return;
+
+            localStorage.setItem('bulkNumbers', reales.join('\n'));
+            window.location.href = '/';
+        });
+
+        // Manejador para actualizar la lista de contactos
+        document.getElementById('load-history-btn').addEventListener('click', async () => {
             const loadBtn = document.getElementById('load-history-btn');
             loadBtn.disabled = true;
-            loadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Cargando...';
-
-            const progressContainer = document.getElementById('load-history-progress-container');
-            progressContainer.style.display = 'block';
-
+            loadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Actualizando...';
             try {
-                const response = await fetch('/api/crm/load-history', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-
-                const result = await response.json();
-
-                if (result.success) {
-                    showAlert('Historial cargado correctamente. Ahora puedes escanear los contactos.', 'success');
-                } else {
-                    showAlert('Error: ' + result.error, 'danger');
-                }
+                await loadContacts(document.getElementById('label-filter').value || null);
+                await loadLabels();
+                showAlert('Lista de contactos actualizada.', 'success');
             } catch (error) {
-                showAlert('Error cargando historial: ' + error.message, 'danger');
+                showAlert('Error actualizando: ' + error.message, 'danger');
             } finally {
                 loadBtn.disabled = false;
-                loadBtn.innerHTML = '<i class="fas fa-download me-2"></i>Cargar historial de WhatsApp';
-                progressContainer.style.display = 'none';
+                loadBtn.innerHTML = '<i class="fas fa-sync me-2"></i>Actualizar contactos';
             }
         });
 
@@ -688,9 +730,16 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    showAlert(`Escaneo completado: ${result.results.labeled} contactos etiquetados`, 'success');
+                    const r = result.results;
+                    let msg = `Escaneo completado: ${r.labeled} etiquetados`;
+                    if (r.skipped) msg += `, ${r.skipped} ya tenían etiqueta`;
+                    if (r.failed) msg += `, ${r.failed} con error`;
+                    if (r.labeled === 0 && r.skipped === 0) {
+                        msg = 'No se etiquetó nada: los contactos no tienen texto de conversación para analizar. Escribe una nota o espera a recibir mensajes.';
+                    }
+                    showAlert(msg, r.labeled > 0 || r.skipped > 0 ? 'success' : 'warning');
                     setTimeout(() => {
-                        loadContacts();
+                        loadContacts(document.getElementById('label-filter').value || null);
                         loadLabels();
                     }, 1000);
                 } else {

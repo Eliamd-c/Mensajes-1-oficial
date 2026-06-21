@@ -406,7 +406,7 @@ async function initializeWhatsApp() {
                     if (!id) continue;
                     const messageText = textOf(msg);
                     batch.push({ ...id, name: msg.pushName || `Usuario ${id.number.substring(0, 5)}`, lastMessage: tsOf(msg), isGroup: false, messageText });
-                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText);
+                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText, { timestamp: tsOf(msg) });
                 } catch (e) { /* ignorar */ }
             }
 
@@ -474,7 +474,7 @@ async function initializeWhatsApp() {
                     const messageText = textOf(msg);
                     batch.push({ ...id, name: msg.pushName || `Usuario ${id.number.substring(0, 5)}`, lastMessage: tsOf(msg), isGroup: false, messageText });
 
-                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText);
+                    if (messageText && messageText.length > 3) saveConversation(id.number, messageText, { timestamp: tsOf(msg) });
 
                     if (m.type === 'notify' && process.env.OPENAI_API_KEY && messageText) {
                         toLabel.push({ number: id.number, text: messageText });
@@ -973,6 +973,20 @@ app.delete('/api/crm/contact/:number/label/:label', (req, res) => {
     }
 });
 
+// Endpoint para obtener la conversación (timeline) de un contacto
+app.get('/api/crm/contact/:number/conversation', (req, res) => {
+    try {
+        const { number } = req.params;
+        res.json({
+            success: true,
+            number,
+            messages: getConversation(number)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Error obteniendo conversación: ' + error.message });
+    }
+});
+
 // Endpoint para obtener todas las etiquetas
 app.get('/api/crm/labels', (req, res) => {
     try {
@@ -1140,23 +1154,33 @@ app.post('/api/crm/scan-messages', async (req, res) => {
     }
 
     try {
+        const soloNuevos = req.body?.soloNuevos !== false; // por defecto, saltar etiquetados
         const contacts = getContacts();
+        const labelsExistentes = getLabels();
         const results = {
             total: contacts.length,
             processed: 0,
             labeled: 0,
+            skipped: 0,
             failed: 0,
             errors: []
         };
 
         for (const contact of contacts) {
             try {
+                // Saltar contactos que ya tienen etiquetas (ahorra dinero de OpenAI)
+                if (soloNuevos && labelsExistentes[contact.number]?.length > 0) {
+                    results.skipped++;
+                    results.processed++;
+                    continue;
+                }
+
                 // Obtener el texto del mensaje, conversación histórica, o notas
                 let messageText = contact.messageText || contact.notes || '';
 
                 // Si no hay mensaje o notas, intentar obtener conversación histórica
                 if (!messageText) {
-                    messageText = getConversation(contact.number) || '';
+                    messageText = getConversationText(contact.number) || '';
                 }
 
                 if (messageText && messageText.length > 5) {
@@ -1724,37 +1748,61 @@ app.post('/api/crm/contact/:number/notes', (req, res) => {
     }
 });
 
-function saveConversation(number, text) {
+const MAX_MENSAJES_GUARDADOS = 50;
+
+// Normaliza el valor almacenado de una conversación a un array de mensajes.
+// Soporta el formato antiguo (string) y el nuevo (array de {t, text, fromMe}).
+function normalizeConversation(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') return [{ t: null, text: value, fromMe: false }];
+    return [];
+}
+
+function saveConversation(number, text, opts = {}) {
     try {
-        const conversationsFile = path.join(LOGS_DIR,'conversations.json');
+        if (!text || !text.trim()) return;
+        const conversationsFile = path.join(LOGS_DIR, 'conversations.json');
         let conversations = {};
 
         if (fs.existsSync(conversationsFile)) {
-            const data = fs.readFileSync(conversationsFile, 'utf8');
-            conversations = JSON.parse(data);
+            conversations = JSON.parse(fs.readFileSync(conversationsFile, 'utf8'));
         }
 
-        conversations[number] = text;
+        const list = normalizeConversation(conversations[number]);
+        // Evitar duplicar el último mensaje idéntico
+        const last = list[list.length - 1];
+        if (!last || last.text !== text) {
+            list.push({
+                t: opts.timestamp || new Date().toISOString(),
+                text,
+                fromMe: !!opts.fromMe
+            });
+        }
+        // Conservar solo los últimos N mensajes
+        conversations[number] = list.slice(-MAX_MENSAJES_GUARDADOS);
         fs.writeFileSync(conversationsFile, JSON.stringify(conversations, null, 2));
     } catch (error) {
         console.error('Error guardando conversación:', error);
     }
 }
 
+// Devuelve el array de mensajes de un contacto
 function getConversation(number) {
     try {
-        const conversationsFile = path.join(LOGS_DIR,'conversations.json');
-        if (!fs.existsSync(conversationsFile)) {
-            return null;
-        }
-
-        const data = fs.readFileSync(conversationsFile, 'utf8');
-        const conversations = JSON.parse(data);
-        return conversations[number] || null;
+        const conversationsFile = path.join(LOGS_DIR, 'conversations.json');
+        if (!fs.existsSync(conversationsFile)) return [];
+        const conversations = JSON.parse(fs.readFileSync(conversationsFile, 'utf8'));
+        return normalizeConversation(conversations[number]);
     } catch (error) {
         console.error('Error obteniendo conversación:', error);
-        return null;
+        return [];
     }
+}
+
+// Devuelve el texto concatenado de la conversación (para etiquetado con IA)
+function getConversationText(number) {
+    return getConversation(number).map(m => m.text).filter(Boolean).join(' | ');
 }
 
 // Lee los contactos crudos del archivo (sin resolver ni deduplicar)
