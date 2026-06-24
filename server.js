@@ -385,15 +385,15 @@ async function initializeWhatsApp() {
                 } catch (e) { /* ignorar */ }
             }
 
-            // 2) Chats
+            // 2) Chats: chat.pnJid trae el NÚMERO REAL (lo que muestra WhatsApp Web)
             for (const chat of chats || []) {
                 try {
                     if (!chat.id || chat.id.includes('@g.us')) continue;
-                    const pnJid = isPnJid(chat.id) ? chat.id : null;
+                    const pnJid = isPnJid(chat.pnJid) ? chat.pnJid : isPnJid(chat.id) ? chat.id : null;
                     const lidJid = isLidJid(chat.lidJid) ? chat.lidJid : isLidJid(chat.id) ? chat.id : null;
                     const id = buildIdentity(pnJid, lidJid);
                     if (!id) continue;
-                    batch.push({ ...id, name: chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                    batch.push({ ...id, name: chat.displayName || chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
                 } catch (e) { /* ignorar */ }
             }
 
@@ -423,17 +423,48 @@ async function initializeWhatsApp() {
             for (const chat of chats) {
                 try {
                     if (!chat.id || chat.id.includes('@g.us')) continue;
-                    const pnJid = isPnJid(chat.id) ? chat.id : null;
+                    const pnJid = isPnJid(chat.pnJid) ? chat.pnJid : isPnJid(chat.id) ? chat.id : null;
                     const lidJid = isLidJid(chat.lidJid) ? chat.lidJid : isLidJid(chat.id) ? chat.id : null;
                     const id = buildIdentity(pnJid, lidJid);
                     if (!id) continue;
-                    batch.push({ ...id, name: chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                    batch.push({ ...id, name: chat.displayName || chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
                 } catch (e) { /* ignorar */ }
             }
             if (batch.length > 0) {
                 saveContactsBatch(batch);
                 console.log(`chats.upsert: ${batch.length} contactos guardados`);
             }
+        });
+
+        // chats.update también puede traer pnJid (resolución LID->número en vivo)
+        sock.ev.on('chats.update', (updates) => {
+            const batch = [];
+            for (const chat of updates || []) {
+                try {
+                    if (!chat.id || chat.id.includes('@g.us')) continue;
+                    const pnJid = isPnJid(chat.pnJid) ? chat.pnJid : isPnJid(chat.id) ? chat.id : null;
+                    const lidJid = isLidJid(chat.lidJid) ? chat.lidJid : isLidJid(chat.id) ? chat.id : null;
+                    if (!pnJid && !lidJid) continue;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
+                    batch.push({ ...id, name: chat.displayName || chat.name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                } catch (e) { /* ignorar */ }
+            }
+            if (batch.length > 0) saveContactsBatch(batch);
+        });
+
+        // Evento clave: WhatsApp comparte el número real detrás de un LID
+        sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
+            try {
+                const lidD = digitsOf(lid), pnD = digitsOf(jid);
+                if (lidD && pnD) {
+                    recordLidMapping(lidD, pnD);
+                    if (lidMapDirty) { saveLidMap(); lidMapDirty = false; }
+                    compactContactsFile();
+                    console.log(`phoneNumberShare: LID ${lidD} -> ${pnD}`);
+                    io.emit('contacts-updated', { total: getContacts().length });
+                }
+            } catch (e) { /* ignorar */ }
         });
 
         // Capturar nombres de contactos durante sincronización (lid + jid)
@@ -455,6 +486,24 @@ async function initializeWhatsApp() {
                 saveContactsBatch(batch);
                 console.log(`contacts.upsert: ${batch.length} contactos actualizados`);
             }
+        });
+
+        // contacts.update: actualizaciones parciales que pueden traer el número real (.jid)
+        sock.ev.on('contacts.update', (updates) => {
+            const batch = [];
+            for (const contact of updates || []) {
+                try {
+                    if (!contact.id || contact.id.includes('@g.us')) continue;
+                    const pnJid = isPnJid(contact.jid) ? contact.jid : isPnJid(contact.id) ? contact.id : null;
+                    const lidJid = isLidJid(contact.lid) ? contact.lid : isLidJid(contact.id) ? contact.id : null;
+                    if (!pnJid && !lidJid) continue;
+                    const id = buildIdentity(pnJid, lidJid);
+                    if (!id) continue;
+                    const name = contact.notify || contact.verifiedName || contact.name || '';
+                    batch.push({ ...id, name: name || `Usuario ${id.number.substring(0, 5)}`, lastMessage: new Date().toISOString(), isGroup: false, messageText: '' });
+                } catch (e) { /* ignorar */ }
+            }
+            if (batch.length > 0) saveContactsBatch(batch);
         });
 
         // Capturar mensajes en tiempo real (notify) e historial (append)
