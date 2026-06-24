@@ -249,10 +249,13 @@ async function initializeWhatsApp() {
             version,
             auth: state,
             printQRInTerminal: false,
-            browser: ['Mensajes Masivos', 'Chrome', '10.0'],
+            // Usar un navegador estándar para evitar bloqueos/desconexiones de WhatsApp
+            browser: ['Ubuntu', 'Chrome', '110.0.5481.77'],
+            // Deshabilitar logs internos de baileys para evitar saturar el event loop y memoria
+            logger: require('pino')({ level: 'silent' }),
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
-            keepAliveIntervalMs: 25000,
+            keepAliveIntervalMs: 15000, // Enviar pings más frecuente para mantener conexión activa
             retryRequestDelayMs: 250,
             emitOwnEvents: false,
             // Estabilidad: NO descargar todo el historial (causa sobrecarga y
