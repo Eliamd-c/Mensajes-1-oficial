@@ -146,11 +146,31 @@
                     <i class="fas fa-sync me-2"></i>Actualizar contactos
                 </button>
                 <button class="btn btn-success ms-2" id="bulk-action-btn" style="display: none;">
-                    <i class="fas fa-envelope me-2"></i>Enviar mensaje masivo a filtrados
+                    <i class="fas fa-envelope me-2"></i>Enviar mensaje masivo
                 </button>
                 <button class="btn btn-warning ms-2" id="scan-btn">
                     <i class="fas fa-magic me-2"></i>Escanear y etiquetar todos los contactos
                 </button>
+            </div>
+        </div>
+
+        <!-- Barra de selección -->
+        <div class="row mb-3" id="selection-bar" style="display: none;">
+            <div class="col-12">
+                <div class="card border-success">
+                    <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+                        <span class="badge bg-success fs-6" id="selected-count">0 seleccionados</span>
+                        <button class="btn btn-sm btn-outline-secondary" id="select-all-btn">
+                            <i class="fas fa-check-double me-1"></i>Seleccionar todos los visibles
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" id="clear-selection-btn">
+                            <i class="fas fa-times me-1"></i>Limpiar selección
+                        </button>
+                        <button class="btn btn-sm btn-success ms-auto" id="send-selected-btn" disabled>
+                            <i class="fas fa-paper-plane me-1"></i>Enviar a seleccionados
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -299,6 +319,7 @@
         let filteredContacts = [];
         let allLabels = [];
         let editingNumber = null;
+        const selectedNumbers = new Set();
         const editLabelsModal = new bootstrap.Modal(document.getElementById('editLabelsModal'));
         const configModal = new bootstrap.Modal(document.getElementById('configModal'));
         const socket = io();
@@ -413,6 +434,7 @@
                     </div>
                 `;
                 document.getElementById('bulk-action-btn').style.display = 'none';
+                document.getElementById('selection-bar').style.display = 'none';
                 return;
             }
 
@@ -421,12 +443,19 @@
             const contactsHTML = filteredContacts.map(contact => {
                 const initials = getInitials(contact.name);
                 const lastMessageDate = formatDate(contact.lastMessage);
+                const enviable = contact.numberType !== 'lid';
+                const checked = selectedNumbers.has(contact.number) ? 'checked' : '';
 
                 return `
                     <div class="col-md-6 col-lg-4 mb-3">
-                        <div class="card contact-card h-100">
+                        <div class="card contact-card h-100 ${checked ? 'border-success' : ''}">
                             <div class="card-body">
                                 <div class="d-flex align-items-start">
+                                    <div class="form-check me-2 pt-1">
+                                        <input class="form-check-input contact-check" type="checkbox"
+                                            data-number="${escapeHtml(contact.number)}" ${checked}
+                                            ${enviable ? '' : 'disabled title="Sin número real, no se puede enviar"'}>
+                                    </div>
                                     <div class="contact-avatar me-3">
                                         ${initials}
                                     </div>
@@ -463,6 +492,27 @@
             container.querySelectorAll('.btn-editar').forEach(btn => {
                 btn.addEventListener('click', () => openEditLabels(btn.dataset.number));
             });
+
+            // Checkboxes de selección
+            container.querySelectorAll('.contact-check').forEach(chk => {
+                chk.addEventListener('change', () => {
+                    const num = chk.dataset.number;
+                    if (chk.checked) selectedNumbers.add(num);
+                    else selectedNumbers.delete(num);
+                    chk.closest('.card').classList.toggle('border-success', chk.checked);
+                    updateSelectionBar();
+                });
+            });
+
+            document.getElementById('selection-bar').style.display = 'block';
+            updateSelectionBar();
+        }
+
+        // Actualiza el contador y estado de la barra de selección
+        function updateSelectionBar() {
+            const count = selectedNumbers.size;
+            document.getElementById('selected-count').textContent = `${count} seleccionado${count === 1 ? '' : 's'}`;
+            document.getElementById('send-selected-btn').disabled = count === 0;
         }
 
         function filterByLabel(label) {
@@ -672,23 +722,46 @@
             `;
         }
 
-        // Manejador para envío masivo: lleva los números reales a la página de envío
-        document.getElementById('bulk-action-btn').addEventListener('click', () => {
-            // Solo contactos con número real (los LID no se pueden enviar por número)
-            const reales = filteredContacts.filter(c => c.numberType !== 'lid').map(c => c.number);
-            const ocultos = filteredContacts.length - reales.length;
-
-            if (reales.length === 0) {
-                showAlert('Ninguno de los contactos filtrados tiene número real para enviar.', 'warning');
+        // Lleva una lista de números al formulario de envío
+        function enviarNumeros(numbers, omitidos = 0) {
+            if (numbers.length === 0) {
+                showAlert('No hay números reales para enviar (los contactos con número oculto/LID no se pueden enviar).', 'warning');
                 return;
             }
-
-            let msg = `Se enviarán al formulario ${reales.length} números.`;
-            if (ocultos > 0) msg += ` (${ocultos} con número oculto/LID se omitieron)`;
+            let msg = `Se enviarán al formulario ${numbers.length} número${numbers.length === 1 ? '' : 's'}.`;
+            if (omitidos > 0) msg += ` (${omitidos} con número oculto/LID se omitieron)`;
             if (!confirm(msg + '\n\n¿Continuar?')) return;
 
-            localStorage.setItem('bulkNumbers', reales.join('\n'));
+            localStorage.setItem('bulkNumbers', numbers.join('\n'));
             window.location.href = '/';
+        }
+
+        // "Enviar mensaje masivo": usa seleccionados si los hay, si no todos los filtrados
+        document.getElementById('bulk-action-btn').addEventListener('click', () => {
+            if (selectedNumbers.size > 0) {
+                // Los checkboxes LID están deshabilitados, así que todos son reales
+                enviarNumeros([...selectedNumbers]);
+            } else {
+                const reales = filteredContacts.filter(c => c.numberType !== 'lid').map(c => c.number);
+                enviarNumeros(reales, filteredContacts.length - reales.length);
+            }
+        });
+
+        // Botón "Enviar a seleccionados"
+        document.getElementById('send-selected-btn').addEventListener('click', () => {
+            enviarNumeros([...selectedNumbers]);
+        });
+
+        // Seleccionar todos los contactos visibles (con número real)
+        document.getElementById('select-all-btn').addEventListener('click', () => {
+            filteredContacts.filter(c => c.numberType !== 'lid').forEach(c => selectedNumbers.add(c.number));
+            displayContacts();
+        });
+
+        // Limpiar selección
+        document.getElementById('clear-selection-btn').addEventListener('click', () => {
+            selectedNumbers.clear();
+            displayContacts();
         });
 
         // Manejador para actualizar la lista de contactos
