@@ -133,10 +133,7 @@ const eventStats = {
     historyMessages: 0,
     lastEvent: null,
     lastEventAt: null,
-    connectedAt: null,
-    muestraChats: [],
-    muestraContactos: [],
-    muestraMsgKey: null
+    connectedAt: null
 };
 function trackEvent(name, extra = {}) {
     if (eventStats[name] !== undefined) eventStats[name]++;
@@ -254,11 +251,13 @@ async function initializeWhatsApp() {
             printQRInTerminal: false,
             browser: ['Mensajes Masivos', 'Chrome', '10.0'],
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 0,
+            defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 25000,
             retryRequestDelayMs: 250,
-            emitOwnEvents: true,
-            syncFullHistory: true,
+            emitOwnEvents: false,
+            // Estabilidad: NO descargar todo el historial (causa sobrecarga y
+            // desconexiones). Para enviar mensajes no se necesita.
+            syncFullHistory: false,
             markOnlineOnConnect: false,
             getMessage: async () => { return { conversation: '' }; }
         });
@@ -373,28 +372,6 @@ async function initializeWhatsApp() {
         sock.ev.on('messaging-history.set', ({ chats, contacts, messages, progress }) => {
             console.log(`Historia sincronizada: ${chats.length} chats, ${contacts.length} contactos, ${messages.length} mensajes (progreso: ${progress || '?'}%)`);
             trackEvent('messaging-history.set', { chats: chats?.length || 0, contacts: contacts?.length || 0, messages: messages?.length || 0 });
-
-            // DIAGNÓSTICO: capturar muestra de campos crudos para ver por qué no hay pnJid
-            try {
-                if ((chats || []).length && eventStats.muestraChats.length === 0) {
-                    eventStats.muestraChats = chats.slice(0, 6).map(c => ({
-                        id: c.id, pnJid: c.pnJid || null, lidJid: c.lidJid || null,
-                        name: c.name || null, displayName: c.displayName || null,
-                        campos: Object.keys(c)
-                    }));
-                }
-                if ((contacts || []).length && eventStats.muestraContactos.length === 0) {
-                    eventStats.muestraContactos = contacts.slice(0, 6).map(c => ({
-                        id: c.id, jid: c.jid || null, lid: c.lid || null,
-                        notify: c.notify || null, campos: Object.keys(c)
-                    }));
-                }
-                const m0 = (messages || [])[0];
-                if (m0 && !eventStats.muestraMsgKey) {
-                    eventStats.muestraMsgKey = { ...m0.key };
-                }
-            } catch (e) { /* ignorar */ }
-
             const batch = [];
 
             // 1) Primero los contactos: traen lid + jid (mejor fuente para el mapa LID->número)
