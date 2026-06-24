@@ -140,7 +140,7 @@
         </div>
 
         <!-- Botón de Escaneo -->
-        <div class="row mb-4">
+        <div class="row mb-3">
             <div class="col-12">
                 <button class="btn btn-warning" id="scan-btn">
                     <i class="fas fa-magic me-2"></i>Escanear y etiquetar todos con IA
@@ -148,6 +148,26 @@
                 <a href="/crm" class="btn btn-info ms-2">
                     <i class="fas fa-tags me-2"></i>Ver en CRM
                 </a>
+            </div>
+        </div>
+
+        <!-- Barra de selección -->
+        <div class="row mb-3" id="selection-bar" style="display: none;">
+            <div class="col-12">
+                <div class="card border-success">
+                    <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+                        <span class="badge bg-success fs-6" id="selected-count">0 seleccionados</span>
+                        <button class="btn btn-sm btn-outline-secondary" id="select-all-btn">
+                            <i class="fas fa-check-double me-1"></i>Seleccionar todos los visibles
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" id="clear-selection-btn">
+                            <i class="fas fa-times me-1"></i>Limpiar selección
+                        </button>
+                        <button class="btn btn-sm btn-success ms-auto" id="send-selected-btn" disabled>
+                            <i class="fas fa-paper-plane me-1"></i>Enviar mensaje masivo a seleccionados
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -196,13 +216,35 @@
         let allContacts = [];
         let filteredContacts = [];
         let currentFilter = null;
+        const selectedNumbers = new Set();
         const socket = io();
+
+        // Escapa texto para insertarlo de forma segura en HTML
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
 
         // Cargar contactos al iniciar
         document.addEventListener('DOMContentLoaded', loadContacts);
 
         // Búsqueda en tiempo real
         document.getElementById('search-input').addEventListener('input', filterContacts);
+
+        // Botones de selección
+        document.getElementById('send-selected-btn').addEventListener('click', () => {
+            enviarNumeros([...selectedNumbers]);
+        });
+        document.getElementById('select-all-btn').addEventListener('click', () => {
+            filteredContacts.filter(c => c.numberType !== 'lid').forEach(c => selectedNumbers.add(c.number));
+            displayContacts();
+        });
+        document.getElementById('clear-selection-btn').addEventListener('click', () => {
+            selectedNumbers.clear();
+            displayContacts();
+        });
 
         async function loadContacts(days = null) {
             try {
@@ -247,6 +289,7 @@
             if (filteredContacts.length === 0) {
                 container.innerHTML = '';
                 noContactsDiv.classList.remove('d-none');
+                document.getElementById('selection-bar').style.display = 'none';
                 return;
             }
             
@@ -256,18 +299,29 @@
                 const initials = getInitials(contact.name);
                 const lastMessageDate = formatDate(contact.lastMessage);
                 const firstContactDate = formatDate(contact.firstContact);
-                
+                const enviable = contact.numberType !== 'lid';
+                const checked = selectedNumbers.has(contact.number) ? 'checked' : '';
+
+                const numeroHtml = enviable
+                    ? `<div class="contact-number">+${contact.number}</div>`
+                    : `<span class="badge bg-warning text-dark" title="WhatsApp oculta el número real. Aparecerá cuando este contacto te escriba."><i class="fas fa-user-secret me-1"></i>Número oculto</span>`;
+
                 return `
                     <div class="col-md-6 col-lg-4 mb-3">
-                        <div class="card contact-card h-100" onclick="copyNumber('${contact.number}')">
+                        <div class="card contact-card h-100 ${checked ? 'border-success' : ''}">
                             <div class="card-body">
                                 <div class="d-flex align-items-center">
+                                    <div class="form-check me-2">
+                                        <input class="form-check-input contact-check" type="checkbox"
+                                            data-number="${escapeHtml(contact.number)}" ${checked}
+                                            ${enviable ? '' : 'disabled title="Sin número real, no se puede enviar"'}>
+                                    </div>
                                     <div class="contact-avatar me-3">
                                         ${initials}
                                     </div>
                                     <div class="contact-info">
-                                        <h6 class="mb-1">${contact.name}</h6>
-                                        <div class="contact-number">+${contact.number}</div>
+                                        <h6 class="mb-1">${escapeHtml(contact.name)}</h6>
+                                        ${numeroHtml}
                                         <div class="contact-date">
                                             <i class="fas fa-clock me-1"></i>
                                             Último: ${lastMessageDate}
@@ -277,17 +331,53 @@
                                             Primer contacto: ${firstContactDate}
                                         </div>
                                     </div>
-                                    <div class="text-success">
+                                    ${enviable ? `<button class="btn btn-link text-success btn-copiar p-0" data-number="${escapeHtml(contact.number)}" title="Copiar número">
                                         <i class="fas fa-copy"></i>
-                                    </div>
+                                    </button>` : ''}
                                 </div>
                             </div>
                         </div>
                     </div>
                 `;
             }).join('');
-            
+
             container.innerHTML = contactsHTML;
+
+            // Checkboxes de selección
+            container.querySelectorAll('.contact-check').forEach(chk => {
+                chk.addEventListener('change', () => {
+                    const num = chk.dataset.number;
+                    if (chk.checked) selectedNumbers.add(num);
+                    else selectedNumbers.delete(num);
+                    chk.closest('.card').classList.toggle('border-success', chk.checked);
+                    updateSelectionBar();
+                });
+            });
+
+            // Botones de copiar
+            container.querySelectorAll('.btn-copiar').forEach(btn => {
+                btn.addEventListener('click', () => copyNumber(btn.dataset.number));
+            });
+
+            document.getElementById('selection-bar').style.display = 'block';
+            updateSelectionBar();
+        }
+
+        function updateSelectionBar() {
+            const count = selectedNumbers.size;
+            document.getElementById('selected-count').textContent = `${count} seleccionado${count === 1 ? '' : 's'}`;
+            document.getElementById('send-selected-btn').disabled = count === 0;
+        }
+
+        // Lleva los números seleccionados al formulario de envío
+        function enviarNumeros(numbers) {
+            if (numbers.length === 0) {
+                showAlert('Selecciona al menos un contacto con número real.', 'warning');
+                return;
+            }
+            if (!confirm(`Se enviarán al formulario ${numbers.length} número${numbers.length === 1 ? '' : 's'}.\n\n¿Continuar?`)) return;
+            localStorage.setItem('bulkNumbers', numbers.join('\n'));
+            window.location.href = '/';
         }
 
         function filterContacts() {
